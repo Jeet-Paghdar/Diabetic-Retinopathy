@@ -1,9 +1,5 @@
 # Diabetic Retinopathy Detection System
 
-![Python]
-![TensorFlow]
-![License]
-
 ## Project Overview
 We are trying to develop a deep learning-based diagnostic tool designed to detect and grade **Diabetic Retinopathy (DR)** from retinal fundus images. Unlike standard CNN approaches, this project utilizes a **Hybrid Ensemble** of EfficientNet and Vision Transformers (ViT) to capture both local lesions and global retinal features.
 
