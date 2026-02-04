@@ -393,11 +393,11 @@ def main():
         print(f"  Data type: {processed.dtype}")
         print(f"  Value range: [{processed.min()}, {processed.max()}]")
     else:
-        print(f"  Sample image not found: {sample_image}")
+        print(f"⚠️  Sample image not found: {sample_image}")
         print("   Update the path to test preprocessing")
     
     print("\n" + "=" * 60)
-    print(" Preprocessing module ready!")
+    print("✅ Preprocessing module ready!")
     print("=" * 60)
     print("\nNext steps:")
     print("  1. Test on sample images in notebooks/02_preprocess.ipynb")
