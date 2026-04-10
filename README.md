@@ -6,7 +6,7 @@ We are trying to develop a deep learning-based diagnostic tool designed to detec
 The system has tried to include an **Explainable AI (XAI)** module using Grad-CAM to generate heatmaps, helping clinicians trust the AI's predictions by visualizing the infected regions.
 
 ## Key Features
-- **Training Model:** Uses EfficientNetB4 Training Model which generates an accuracy of 82.02%.
+- **Training Model:** Uses EfficientNetB4 Training Model which generates an accuracy of 82.05%.
 - **Ben Graham's Preprocessing:** Advanced image enhancement techniques.
 - **Explainability:** Grad-CAM heatmaps to visualize disease severity.
 - **Web Interface:** User-friendly Streamlit dashboard for real-time diagnosis.
