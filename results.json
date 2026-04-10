@@ -1,0 +1,12 @@
+{
+  "model_name": "EfficientNetB4 Ensemble",
+  "final_metrics": {
+    "accuracy": 0.8205,
+    "quadratic_weighted_kappa": 0.871,
+    "weighted_f1_score": 0.82
+  },
+  "dataset": "Merged APTOS 2019 & EyePACS Kaggle 2015",
+  "preprocessing": "Ben Graham's Circular Crop & CLAHE",
+  "input_resolution": "380x380",
+  "evaluation_strategy": "Ensemble (Phase 1 + Phase 3 Fine-tuning)"
+}

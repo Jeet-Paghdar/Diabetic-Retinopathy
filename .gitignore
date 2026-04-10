@@ -3,10 +3,13 @@ data/
 *.zip
 *.csv
 
-# Ignore Large Models
+# Large Models
+# Tracked via Git LFS
 *.h5
 *.keras
 models/
+!models/efficientnet_best.keras
+!retinascan_ai.db
 
 # Ignore Python Cache
 __pycache__/
