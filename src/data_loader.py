@@ -1,449 +1,461 @@
 """
-data_loader.py
-Handles loading and splitting the APTOS 2019 Diabetic Retinopathy dataset
+new_data_loader.py
+==================
+Updated data loader for the 82% accuracy EfficientNetB4 model.
+Supports combined APTOS 2019 + EyePACS datasets and the new
+EfficientNetB4 input pipeline (380x380, no manual rescaling —
+the model uses its own preprocessing layer).
+
+Key differences from data_loader.py:
+  - Image size: 380×380 (EfficientNetB4 native input)
+  - No rescale=1./255 — EfficientNetB4 uses internal scaling
+  - Oversampling for minority classes (Grades 1, 3, 4)
+  - Supports both APTOS and EyePACS directory layouts
+  - Integrates GradCAM result path per sample
 
 Usage:
-    from src.data_loader import APTOSDataLoader
-    
-    loader = APTOSDataLoader(data_dir='data/raw')
-    train_df = loader.load_train_data()
-    train_df, val_df = loader.train_val_split(train_df)
+    from src.new_data_loader import NewRetinaScanLoader
+
+    loader = NewRetinaScanLoader(data_dir='data/raw')
+    train_df, val_df = loader.load_and_split()
+    train_gen, val_gen = loader.create_generators(train_df, val_df)
 """
 
 import os
-import pandas as pd
+import cv2
 import numpy as np
+import pandas as pd
+from pathlib import Path
+from typing import Tuple, Dict, List, Optional, Union
 from sklearn.model_selection import train_test_split
 from tensorflow.keras.preprocessing.image import ImageDataGenerator
-import cv2
-from typing import Tuple, List, Dict, Optional
-from pathlib import Path
 
-class APTOSDataLoader:
+# ── Constants ─────────────────────────────────────────────────────────────────
+IMAGE_SIZE      = (380, 380)          # EfficientNetB4 native size
+BATCH_SIZE      = 16
+NUM_CLASSES     = 5
+RANDOM_STATE    = 42
+
+CLASS_NAMES = {
+    0: 'No DR',
+    1: 'Mild DR',
+    2: 'Moderate DR',
+    3: 'Severe DR',
+    4: 'Proliferative DR'
+}
+
+# Severity levels for clinical sorting
+SEVERITY = {
+    0: 'Normal',
+    1: 'Mild',
+    2: 'Moderate',
+    3: 'Severe',
+    4: 'Proliferative'
+}
+
+# ── Main Loader Class ─────────────────────────────────────────────────────────
+
+class NewRetinaScanLoader:
     """
-    Data loader for APTOS 2019 Diabetic Retinopathy Detection dataset
-    
-    Attributes:
-        data_dir: Root directory containing the raw data
-        train_csv_path: Path to training labels [CSV]
-        test_csv_path: Path to test labels [CSV]  
-        train_images_dir: Directory with training images
-        test_images_dir: Directory with test images
+    Data loader for the 82% EfficientNetB4 model.
+    Supports APTOS 2019 and combined APTOS + EyePACS datasets.
+
+    Improvements over the original APTOSDataLoader:
+      * 380×380 input (matches EfficientNetB4 training resolution)
+      * No pixel rescaling here (EfficientNetB4 includes preprocessing)
+      * Built-in oversampling for rare DR grades
+      * Per-sample GradCAM output path tracking
     """
-    
-    def __init__(self, data_dir: str = 'data/raw'):
-        """
-        Initialize the data loader
-        
-        Args:
-            data_dir: Path to the raw data directory (default: 'data/raw')
-        """
-        self.data_dir = Path(data_dir)
-        self.train_csv_path = self.data_dir / 'train.csv'
-        self.test_csv_path = self.data_dir / 'test.csv'
-        self.train_images_dir = self.data_dir / 'train_images'
-        self.test_images_dir = self.data_dir / 'test_images'
-        
-        # Class names for reference
-        self.class_names = {
-            0: 'No DR',
-            1: 'Mild',
-            2: 'Moderate', 
-            3: 'Severe',
-            4: 'Proliferative DR'
-        }
-        
-        # Verify paths exist
-        self._verify_paths()
-        
-    def _verify_paths(self):
-        """Check if all required files and folders exist"""
-        required_paths = {
-            'Training CSV': self.train_csv_path,
-            'Test CSV': self.test_csv_path,
-            'Training Images': self.train_images_dir,
-            'Test Images': self.test_images_dir
-        }
-        
-        missing_paths = []
-        for name, path in required_paths.items():
-            if not path.exists():
-                missing_paths.append(f"{name}: {path}")
-        
-        if missing_paths:
-            raise FileNotFoundError(
-                f"Missing required paths:\n" + "\n".join(missing_paths)
-            )
-        
-        print("=" * 60)
-        print(" Dataset Verification Complete")
-        print("=" * 60)
-        for name, path in required_paths.items():
-            print(f"   {name}: {path}")
-        print("=" * 60)
-    
-    def load_train_data(self, verify_images: bool = True) -> pd.DataFrame:
-        """
-        Load training CSV with full image paths and optional verification
-        
-        Args:
-            verify_images: Whether to check if all images exist (default: True)
-            
-        Return Type:
-            DataFrame with columns: id_code, diagnosis, image_path, class_name
-        """
-        print("\nLoading Training Data...")
-        
-        # Read CSV
-        df = pd.read_csv(self.train_csv_path)
-        
-        # Add full image paths
-        df['image_path'] = df['id_code'].apply(
-            lambda x: str(self.train_images_dir / f"{x}.png")
-        )
-        
-        # Add human-readable class names
-        df['class_name'] = df['diagnosis'].map(self.class_names)
-        
-        # Verify images exist
-        if verify_images:
-            print("   Verifying image files...")
-            df['exists'] = df['image_path'].apply(os.path.exists)
-            missing = df[~df['exists']]
-            
-            if len(missing) > 0:
-                print(f"WARNING: {len(missing)} images not found!")
-                print(f"Missing IDs: {missing['id_code'].tolist()[:5]}...")
-                df = df[df['exists']].copy()
-            else:
-                print("All images verified")
-            
-            df = df.drop('exists', axis=1)
-        
-        # Display statistics
-        print(f"\nLoaded {len(df)} training samples")
-        print(f"\nClass Distribution:")
-        print("-" * 50)
-        for grade in sorted(df['diagnosis'].unique()):
-            count = len(df[df['diagnosis'] == grade])
-            percentage = (count / len(df)) * 100
-            class_name = self.class_names[grade]
-            print(f"  Grade {grade} ({class_name:20s}): {count:5d} ({percentage:5.2f}%)")
-        print("-" * 50)
-        
-        return df
-    
-    def load_test_data(self) -> pd.DataFrame:
-        """
-        Load test CSV with full image paths
-        Note: Test set has no labels (for Kaggle submission)
-        
-        Returns:
-            DataFrame with columns: id_code, image_path
-        """
-        print("\nLoading Test Data...")
-        
-        df = pd.read_csv(self.test_csv_path)
-        
-        # Add full image paths
-        df['image_path'] = df['id_code'].apply(
-            lambda x: str(self.test_images_dir / f"{x}.png")
-        )
-        
-        print(f"Loaded {len(df)} test samples")
-        
-        return df
-    
-    def train_val_split(
-        self, 
-        df: pd.DataFrame, 
-        val_size: float = 0.15,
-        random_state: int = 42
-    ) -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """
-        Split training data into train and validation sets with stratification
-        Stratification ensures each class is proportionally represented in both sets
-        
-        Args:
-            df: Training DataFrame
-            val_size: Validation set proportion (default: 0.15 = 15%)
-            random_state: Random seed for reproducibility
-            
-        Returns:
-            Tuple of (train_df, val_df)
-        """
-        print(f"\nSplitting Data (Train: {(1-val_size)*100:.0f}%, Val: {val_size*100:.0f}%)...")
-        
-        train_df, val_df = train_test_split(
-            df,
-            test_size=val_size,
-            stratify=df['diagnosis'],  # Critical: maintains class balance
-            random_state=random_state
-        )
-        
-        # Reset indices
-        train_df = train_df.reset_index(drop=True)
-        val_df = val_df.reset_index(drop=True)
-        
-        print(f"\nSplit Complete:")
-        print(f"  Training Set:   {len(train_df):5d} samples")
-        print(f"  Validation Set: {len(val_df):5d} samples")
-        
-        # Show class distribution in both sets
-        print(f"\n Training Set Distribution:")
-        print("-" * 50)
-        for grade in sorted(train_df['diagnosis'].unique()):
-            count = len(train_df[train_df['diagnosis'] == grade])
-            percentage = (count / len(train_df)) * 100
-            print(f"  Grade {grade}: {count:5d} ({percentage:5.2f}%)")
-        
-        print(f"\n Validation Set Distribution:")
-        print("-" * 50)
-        for grade in sorted(val_df['diagnosis'].unique()):
-            count = len(val_df[val_df['diagnosis'] == grade])
-            percentage = (count / len(val_df)) * 100
-            print(f"  Grade {grade}: {count:5d} ({percentage:5.2f}%)")
-        print("-" * 50)
-        
-        return train_df, val_df
-    
-    def get_class_weights(self, df: pd.DataFrame, method: str = 'balanced') -> Dict[int, float]:
-        """
-        Calculate class weights to handle imbalanced dataset
-        APTOS dataset is heavily skewed toward Grade 0
-        
-        Args:
-            df: Training DataFrame
-            method: 'balanced' (sklearn-style) or 'inverse' (simple inverse frequency)
-            
-        Returns:
-            Dictionary mapping class index to weight
-        """
-        from sklearn.utils.class_weight import compute_class_weight
-        
-        print(f"\n  Calculating Class Weights (method: {method})...")
-        
-        if method == 'balanced':
-            # Sklearn's balanced approach
-            classes = np.unique(df['diagnosis'])
-            weights = compute_class_weight(
-                class_weight='balanced',
-                classes=classes,
-                y=df['diagnosis']
-            )
-            class_weights = dict(zip(classes, weights))
-        else:
-            # Simple inverse frequency
-            class_counts = df['diagnosis'].value_counts().sort_index()
-            total = len(df)
-            class_weights = {
-                i: total / (len(class_counts) * count) 
-                for i, count in class_counts.items()
-            }
-        
-        print(" Class Weights:")
-        print("-" * 50)
-        for cls in sorted(class_weights.keys()):
-            print(f"  Grade {cls} ({self.class_names[cls]:20s}): {class_weights[cls]:.4f}")
-        print("-" * 50)
-        print("  Higher weights = model pays more attention to that class")
-        
-        return class_weights
-    
-    def create_augmentation_generator(
+
+    def __init__(
         self,
-        mode: str = 'train'
-    ) -> ImageDataGenerator:
-        """
-        Create ImageDataGenerator with appropriate augmentation settings
-        
-        Args:
-            mode: 'train' (with augmentation) or 'val' (no augmentation, only rescaling)
-            
-        Returns:
-            Configured ImageDataGenerator
-        """
-        if mode == 'train':
-            print("\n Creating Training Data Generator (with augmentation)...")
-            generator = ImageDataGenerator(
-                rescale=1./255,
-                rotation_range=15,           # Rotate ±15 degrees
-                width_shift_range=0.1,       # Shift horizontally by 10%
-                height_shift_range=0.1,      # Shift vertically by 10%
-                horizontal_flip=True,        # Mirror image horizontally
-                vertical_flip=True,          # Mirror image vertically
-                zoom_range=0.1,              # Zoom in/out by 10%
-                fill_mode='constant',        # Fill empty pixels with black
-                cval=0                       # Black color value
-            )
-            print("   Augmentation enabled: rotation, flips, shifts, zoom")
-        else:
-            print("\n Creating Validation Data Generator (no augmentation)...")
-            generator = ImageDataGenerator(
-                rescale=1./255  # Only normalize pixel values
-            )
-            print("   Only rescaling applied")
-        
-        return generator
-    
-    def check_image_quality(
-        self, 
-        df: pd.DataFrame, 
-        sample_size: int = 100,
-        check_dimensions: bool = True
-    ) -> Dict[str, List]:
-        """
-        Perform quality checks on images
-        
-        Args:
-            df: DataFrame with image paths
-            sample_size: Number of images to check (None = check all)
-            check_dimensions: Whether to record image dimensions
-            
-        Returns:
-            Dictionary with 'corrupted', 'dimensions' lists
-        """
-        if sample_size is None or sample_size > len(df):
-            sample_size = len(df)
-            
-        print(f"\n Quality Check: Inspecting {sample_size} images...")
-        
-        sample = df.sample(min(sample_size, len(df)), random_state=42)
-        corrupted = []
-        dimensions = []
-        
-        for idx, row in sample.iterrows():
-            try:
-                img = cv2.imread(row['image_path'])
-                if img is None:
-                    corrupted.append(row['id_code'])
-                elif check_dimensions:
-                    dimensions.append({
-                        'id': row['id_code'],
-                        'height': img.shape[0],
-                        'width': img.shape[1],
-                        'channels': img.shape[2] if len(img.shape) == 3 else 1
-                    })
-            except Exception as e:
-                corrupted.append(row['id_code'])
-                print(f"   Error reading {row['id_code']}: {e}")
-        
-        # Report results
-        if len(corrupted) > 0:
-            print(f"    Found {len(corrupted)} corrupted images: {corrupted[:5]}")
-        else:
-            print(f"   All {sample_size} sampled images are readable")
-        
-        if check_dimensions and len(dimensions) > 0:
-            dims_df = pd.DataFrame(dimensions)
-            print(f"\n Image Dimensions Summary:")
-            print(f"  Heights: {dims_df['height'].min()} - {dims_df['height'].max()}")
-            print(f"  Widths:  {dims_df['width'].min()} - {dims_df['width'].max()}")
-            print(f"  Mode:    {dims_df['height'].mode().values[0]}x{dims_df['width'].mode().values[0]}")
-        
-        return {
-            'corrupted': corrupted,
-            'dimensions': dimensions
-        }
-    
-    def get_sample_images(
-        self, 
-        df: pd.DataFrame, 
-        n_per_class: int = 2
-    ) -> Dict[int, List[str]]:
-        """
-        Get sample image paths for each class
-        For visualization in EDA
-        
-        Args:
-            df: DataFrame with images
-            n_per_class: Number of samples per class
-            
-        Returns:
-            Dictionary mapping class -> list of image paths
-        """
-        samples = {}
-        for grade in sorted(df['diagnosis'].unique()):
-            grade_df = df[df['diagnosis'] == grade]
-            sample_paths = grade_df.sample(
-                min(n_per_class, len(grade_df)), 
-                random_state=42
-            )['image_path'].tolist()
-            samples[grade] = sample_paths
-        
-        return samples
-    
-    def save_split_info(
-        self, 
-        train_df: pd.DataFrame, 
-        val_df: pd.DataFrame,
-        output_dir: str = 'data/processed'
+        data_dir: str = 'data/raw',
+        image_size: Tuple[int, int] = IMAGE_SIZE,
+        use_eyepacs: bool = False,
+        eyepacs_dir: Optional[str] = None,
     ):
         """
-        Save train/val split information for reproducibility
-        
         Args:
-            train_df: Training DataFrame
-            val_df: Validation DataFrame
-            output_dir: Directory to save CSV files
+            data_dir    : Root dir for APTOS data (has train.csv, train_images/)
+            image_size  : Target spatial size — default (380, 380) for EfficientNetB4
+            use_eyepacs : If True, also load EyePACS samples from eyepacs_dir
+            eyepacs_dir : Path to EyePACS processed images (required if use_eyepacs)
         """
-        output_path = Path(output_dir)
-        output_path.mkdir(parents=True, exist_ok=True)
-        
-        train_path = output_path / 'train_split.csv'
-        val_path = output_path / 'val_split.csv'
-        
-        train_df.to_csv(train_path, index=False)
-        val_df.to_csv(val_path, index=False)
-        
-        print(f"\n Saved split information:")
-        print(f"  Training:   {train_path}")
-        print(f"  Validation: {val_path}")
+        self.data_dir     = Path(data_dir)
+        self.image_size   = image_size
+        self.use_eyepacs  = use_eyepacs
+        self.eyepacs_dir  = Path(eyepacs_dir) if eyepacs_dir else None
+        self.class_names  = CLASS_NAMES
+
+        # APTOS standard paths
+        self.train_csv      = self.data_dir / 'train.csv'
+        self.train_img_dir  = self.data_dir / 'train_images'
+
+        self._verify_paths()
+
+    # ── Private helpers ───────────────────────────────────────────────────────
+
+    def _verify_paths(self):
+        """Validate that required files and folders exist."""
+        missing = []
+        for label, path in [
+            ('APTOS CSV', self.train_csv),
+            ('APTOS images', self.train_img_dir),
+        ]:
+            if not path.exists():
+                missing.append(f"  {label}: {path}")
+
+        if self.use_eyepacs:
+            if self.eyepacs_dir is None:
+                missing.append("  EyePACS directory: (not provided)")
+            elif not self.eyepacs_dir.exists():
+                missing.append(f"  EyePACS directory: {self.eyepacs_dir}")
+
+        if missing:
+            raise FileNotFoundError(
+                "Missing required paths:\n" + "\n".join(missing)
+            )
+
+        print("=" * 65)
+        print("  NewRetinaScanLoader — Path Verification")
+        print("=" * 65)
+        print(f"  APTOS CSV   : {self.train_csv}")
+        print(f"  APTOS images: {self.train_img_dir}")
+        print(f"  Image size  : {self.image_size[0]}×{self.image_size[1]} (EfficientNetB4)")
+        if self.use_eyepacs:
+            print(f"  EyePACS     : {self.eyepacs_dir}")
+        print("=" * 65)
+
+    def _build_aptos_df(self) -> pd.DataFrame:
+        """Load APTOS CSV and attach image paths + metadata."""
+        df = pd.read_csv(self.train_csv)
+        df['image_path'] = df['id_code'].apply(
+            lambda code: str(self.train_img_dir / f"{code}.png")
+        )
+        df['source']     = 'aptos'
+        df['class_name'] = df['diagnosis'].map(CLASS_NAMES)
+        df['severity']   = df['diagnosis'].map(SEVERITY)
+
+        # Add placeholder column for GradCAM output path
+        df['gradcam_path'] = None
+
+        # Verify images exist
+        df['_exists'] = df['image_path'].apply(os.path.exists)
+        missing = (~df['_exists']).sum()
+        if missing > 0:
+            print(f"  WARNING: {missing} APTOS images not found — skipping.")
+        df = df[df['_exists']].copy().drop('_exists', axis=1)
+
+        return df
+
+    def _build_eyepacs_df(self) -> pd.DataFrame:
+        """
+        Load EyePACS samples from a flat directory layout.
+        Expects sub-folders named 0, 1, 2, 3, 4 (one per grade).
+        """
+        if not self.use_eyepacs or self.eyepacs_dir is None:
+            return pd.DataFrame()
+
+        records = []
+        for grade in range(NUM_CLASSES):
+            grade_dir = self.eyepacs_dir / str(grade)
+            if not grade_dir.exists():
+                continue
+            for img_file in grade_dir.glob('*.png'):
+                records.append({
+                    'id_code'    : img_file.stem,
+                    'diagnosis'  : grade,
+                    'image_path' : str(img_file),
+                    'source'     : 'eyepacs',
+                    'class_name' : CLASS_NAMES[grade],
+                    'severity'   : SEVERITY[grade],
+                    'gradcam_path': None,
+                })
+
+        if not records:
+            print("  WARNING: No EyePACS images found — check folder structure.")
+        return pd.DataFrame(records)
+
+    # ── Public API ────────────────────────────────────────────────────────────
+
+    def load_and_split(
+        self,
+        val_size: float = 0.15,
+        oversample_minority: bool = True,
+        oversample_factor: int = 2,
+    ) -> Tuple[pd.DataFrame, pd.DataFrame]:
+        """
+        Load full dataset (APTOS ± EyePACS) and stratified split.
+
+        Args:
+            val_size           : Fraction for validation (default 15%)
+            oversample_minority: Whether to duplicate minority-class samples in train
+            oversample_factor  : Multiplier for Grades 1, 3, 4 (default 2×)
+
+        Returns:
+            (train_df, val_df) DataFrames with 'image_path', 'diagnosis', etc.
+        """
+        print("\n[1/3] Loading data...")
+        aptos_df = self._build_aptos_df()
+        print(f"  APTOS samples loaded: {len(aptos_df)}")
+
+        if self.use_eyepacs:
+            eyepacs_df = self._build_eyepacs_df()
+            print(f"  EyePACS samples loaded: {len(eyepacs_df)}")
+            combined_df = pd.concat([aptos_df, eyepacs_df], ignore_index=True)
+        else:
+            combined_df = aptos_df
+
+        print(f"  Total samples: {len(combined_df)}")
+
+        # ── Class distribution ────────────────────────────────────────────────
+        print("\n[2/3] Class distribution (before split):")
+        print("-" * 55)
+        for grade in range(NUM_CLASSES):
+            n = (combined_df['diagnosis'] == grade).sum()
+            pct = n / len(combined_df) * 100
+            print(f"  Grade {grade} ({CLASS_NAMES[grade]:18s}): {n:5d}  ({pct:5.1f}%)")
+        print("-" * 55)
+
+        # ── Stratified split ──────────────────────────────────────────────────
+        print("\n[3/3] Stratified train/val split...")
+        train_df, val_df = train_test_split(
+            combined_df,
+            test_size=val_size,
+            stratify=combined_df['diagnosis'],
+            random_state=RANDOM_STATE,
+        )
+        train_df = train_df.reset_index(drop=True)
+        val_df   = val_df.reset_index(drop=True)
+
+        # ── Oversampling ──────────────────────────────────────────────────────
+        if oversample_minority:
+            minority_grades = [1, 3, 4]   # Rare DR grades
+            oversample_parts = []
+            for grade in minority_grades:
+                subset = train_df[train_df['diagnosis'] == grade]
+                for _ in range(oversample_factor - 1):
+                    oversample_parts.append(subset)
+
+            if oversample_parts:
+                extra_df = pd.concat(oversample_parts, ignore_index=True)
+                train_df = pd.concat([train_df, extra_df], ignore_index=True)
+                train_df = train_df.sample(
+                    frac=1, random_state=RANDOM_STATE
+                ).reset_index(drop=True)
+                print(f"  After oversampling: {len(train_df)} train samples")
+
+        print(f"\n  Final split:")
+        print(f"    Train : {len(train_df)} samples")
+        print(f"    Val   : {len(val_df)} samples")
+
+        return train_df, val_df
+
+    def create_generators(
+        self,
+        train_df: pd.DataFrame,
+        val_df: pd.DataFrame,
+        batch_size: int = BATCH_SIZE,
+    ):
+        """
+        Build Keras ImageDataGenerators for EfficientNetB4.
+
+        CRITICAL: No rescale=1./255 here — EfficientNetB4 was trained
+        with pixel values in [0, 255] and uses its own internal
+        preprocessing. Applying manual rescaling would hurt accuracy.
+
+        Args:
+            train_df  : Training DataFrame (must have 'image_path', 'diagnosis')
+            val_df    : Validation DataFrame
+            batch_size: Mini-batch size (default 16 for 380px images on GPU)
+
+        Returns:
+            (train_generator, val_generator) Keras generator tuples
+        """
+        # ── Training augmentation (no rescale!) ───────────────────────────────
+        train_datagen = ImageDataGenerator(
+            # NO rescale — EfficientNetB4 preprocessing is internal
+            rotation_range=15,
+            width_shift_range=0.05,
+            height_shift_range=0.05,
+            horizontal_flip=True,
+            vertical_flip=True,
+            zoom_range=0.05,
+            brightness_range=[0.85, 1.15],
+            fill_mode='constant',
+            cval=0,
+        )
+
+        # ── Validation: no augmentation, no rescale ───────────────────────────
+        val_datagen = ImageDataGenerator()
+
+        # Convert label column to string (required by flow_from_dataframe)
+        train_df = train_df.copy()
+        val_df   = val_df.copy()
+        train_df['label'] = train_df['diagnosis'].astype(str)
+        val_df['label']   = val_df['diagnosis'].astype(str)
+
+        target_size = (self.image_size[0], self.image_size[1])
+
+        train_gen = train_datagen.flow_from_dataframe(
+            dataframe=train_df,
+            x_col='image_path',
+            y_col='label',
+            target_size=target_size,
+            color_mode='rgb',
+            class_mode='categorical',
+            batch_size=batch_size,
+            shuffle=True,
+            seed=RANDOM_STATE,
+        )
+
+        val_gen = val_datagen.flow_from_dataframe(
+            dataframe=val_df,
+            x_col='image_path',
+            y_col='label',
+            target_size=target_size,
+            color_mode='rgb',
+            class_mode='categorical',
+            batch_size=batch_size,
+            shuffle=False,
+        )
+
+        print(f"\n  Generators ready:")
+        print(f"    Input size  : {target_size[0]}×{target_size[1]} × 3")
+        print(f"    Batch size  : {batch_size}")
+        print(f"    Train steps : {len(train_gen)}")
+        print(f"    Val steps   : {len(val_gen)}")
+        print(f"    Rescaling   : DISABLED (EfficientNetB4 preprocessing)")
+
+        return train_gen, val_gen
+
+    def attach_gradcam_paths(
+        self,
+        df: pd.DataFrame,
+        gradcam_output_dir: str = 'gradcam_outputs_new',
+    ) -> pd.DataFrame:
+        """
+        Populate the 'gradcam_path' column for each row.
+        Paths follow the pattern: <output_dir>/<id_code>_gradcam.png
+
+        Args:
+            df               : DataFrame with 'id_code' column
+            gradcam_output_dir: Base directory where GradCAM PNGs are saved
+
+        Returns:
+            DataFrame with 'gradcam_path' filled in
+        """
+        base = Path(gradcam_output_dir)
+        df = df.copy()
+        df['gradcam_path'] = df['id_code'].apply(
+            lambda code: str(base / f"{code}_gradcam.png")
+        )
+        return df
+
+    def get_class_weights(self, train_df: pd.DataFrame) -> Dict[int, float]:
+        """
+        Compute sklearn-style balanced class weights for use in model.fit().
+
+        Args:
+            train_df: Training DataFrame (after oversampling if desired)
+
+        Returns:
+            Dict mapping grade → weight (float)
+        """
+        from sklearn.utils.class_weight import compute_class_weight
+
+        classes = np.unique(train_df['diagnosis'])
+        weights = compute_class_weight(
+            class_weight='balanced',
+            classes=classes,
+            y=train_df['diagnosis'].values,
+        )
+        cw = dict(zip(classes.tolist(), weights.tolist()))
+
+        print("\n  Class Weights (for imbalance handling):")
+        print("-" * 45)
+        for cls in sorted(cw):
+            print(f"    Grade {cls} ({CLASS_NAMES[cls]:18s}): {cw[cls]:.4f}")
+        print("-" * 45)
+
+        return cw
+
+    def load_single_image_for_inference(
+        self,
+        image_path: Union[str, Path],
+        apply_preprocessing: bool = True,
+    ) -> np.ndarray:
+        """
+        Load and prepare a single image for EfficientNetB4 inference.
+
+        IMPORTANT: Returns pixel values in [0, 255] (uint8 range as float32)
+        because EfficientNetB4 applies its own normalization internally.
+
+        Args:
+            image_path         : Path to retinal fundus image
+            apply_preprocessing: If True, apply Ben Graham preprocessing
+
+        Returns:
+            float32 array of shape (1, 380, 380, 3) ready for model.predict()
+        """
+        import cv2
+
+        img = cv2.imread(str(image_path))
+        if img is None:
+            raise ValueError(f"Cannot read image: {image_path}")
+
+        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+
+        if apply_preprocessing:
+            # Minimal inline Ben Graham crop (optional if image already preprocessed)
+            gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
+            mask = gray > 7
+            coords = np.argwhere(mask)
+            if len(coords):
+                y0, x0 = coords.min(axis=0)
+                y1, x1 = coords.max(axis=0)
+                img = img[y0:y1+1, x0:x1+1]
+
+        # Resize to EfficientNetB4 native size
+        img = cv2.resize(img, (self.image_size[1], self.image_size[0]))
+
+        # Cast to float32 — do NOT divide by 255
+        img = img.astype(np.float32)
+
+        return np.expand_dims(img, axis=0)   # (1, 380, 380, 3)
+
+    def print_summary(self, train_df: pd.DataFrame, val_df: pd.DataFrame):
+        """Pretty-print dataset summary for a notebook cell."""
+        total = len(train_df) + len(val_df)
+
+        print("\n" + "=" * 65)
+        print("  NewRetinaScanLoader — Dataset Summary")
+        print("=" * 65)
+        print(f"  Model input size : {self.image_size[0]}×{self.image_size[1]} (EfficientNetB4)")
+        print(f"  Total samples    : {total}")
+        print(f"  Training samples : {len(train_df)}")
+        print(f"  Validation samples: {len(val_df)}")
+        print(f"  Number of classes: {NUM_CLASSES}")
+        print("-" * 65)
+        print(f"  {'Grade':<8} {'Name':<20} {'Train':>8} {'Val':>8}")
+        print("-" * 65)
+        for grade in range(NUM_CLASSES):
+            tr = (train_df['diagnosis'] == grade).sum()
+            vl = (val_df['diagnosis'] == grade).sum()
+            print(f"  {grade:<8} {CLASS_NAMES[grade]:<20} {tr:>8} {vl:>8}")
+        print("=" * 65)
 
 
-def main():
-    """
-    Demonstration of APTOSDataLoader usage
-    Run this script directly to test: python src/data_loader.py
-    """
-    print("\n" + "=" * 60)
-    print("APTOS Data Loader")
-    print("=" * 60)
-    
-    # Initialize loader
-    loader = APTOSDataLoader(data_dir='data/raw')
-    
-    # Load training data
-    train_df = loader.load_train_data(verify_images=True)
-    
-    # Check image quality
-    quality_report = loader.check_image_quality(
-        train_df, 
-        sample_size=100,
-        check_dimensions=True
-    )
-    
-    # Split into train/validation
-    train_df, val_df = loader.train_val_split(train_df, val_size=0.15)
-    
-    # Calculate class weights
-    class_weights = loader.get_class_weights(train_df, method='balanced')
-    
-    # Create data generators
-    train_gen = loader.create_augmentation_generator(mode='train')
-    val_gen = loader.create_augmentation_generator(mode='val')
-    
-    # Get sample images for visualization
-    samples = loader.get_sample_images(train_df, n_per_class=3)
-    
-    # Save split info
-    loader.save_split_info(train_df, val_df)
-    
-    print("\n" + "=" * 60)
-    print(" Data Loading Pipeline Ready!")
-    print("=" * 60)
-    
-    
+# ── Standalone test ───────────────────────────────────────────────────────────
+if __name__ == '__main__':
+    print("\n" + "=" * 65)
+    print("  new_data_loader.py — Self-test")
+    print("=" * 65)
 
-if __name__ == "__main__":
-    main()
+    loader = NewRetinaScanLoader(data_dir='data/raw')
+    train_df, val_df = loader.load_and_split(oversample_minority=True)
+    cw = loader.get_class_weights(train_df)
+    train_gen, val_gen = loader.create_generators(train_df, val_df)
+    loader.print_summary(train_df, val_df)
+
+    print("\n✅ new_data_loader.py is ready for the 82% EfficientNetB4 pipeline.")
