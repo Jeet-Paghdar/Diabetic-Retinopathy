@@ -327,7 +327,7 @@ if page == "Dashboard":
                 </div>
                 <div style='display: flex; align-items: center; gap: 24px;'>
                     <span class='grade-badge grade-{row[4]}'>{row[5]}</span>
-                    <span style='color: #7F8C8D; font-size: 0.85rem;'>{row[11].strftime('%d %b %Y')}</span>
+                    <span style='color: #7F8C8D; font-size: 0.85rem;'>{(row[11] if hasattr(row[11], 'strftime') else __import__('datetime').datetime.fromisoformat(str(row[11]))).strftime('%d %b %Y')}</span>
                 </div>
             </div>
             """, unsafe_allow_html=True)
