@@ -1,377 +1,609 @@
 """
-RetinaScan AI — MySQL Database Module
-Handles all database operations for patient scan records.
-CRUD: Create, Read, Update, Delete
+new_database.py
+===============
+Extended MySQL database module for RetinaScan AI — 82% EfficientNetB4 model.
+
+Builds on database.py with the following additions:
+  - New 'scans' table schema with gradcam_path, model_version, all_probs columns
+  - model_version tracking (records which model made each prediction)
+  - GradCAM overlay path stored per scan record
+  - Batch statistics by model version (useful for comparing old vs 82% model)
+  - JSON storage for per-class probabilities
+
+Table: scans (new, separate from the old 'patients' table)
+  id, patient_name, patient_age, eye_side,
+  grade, grade_name, confidence, all_probabilities (JSON),
+  gradcam_path, model_version, scan_date, notes
+
+Usage:
+    from src.new_database import setup_new_database, insert_new_scan, get_all_new_scans
 """
 
+import json
+import datetime
 import mysql.connector
 from mysql.connector import Error
-import datetime
 
-# ── Database Configuration ────────────────────────────────────────────────────
+# ── Database Configuration ─────────────────────────────────────────────────────
 DB_CONFIG = {
     'host'    : 'localhost',
     'port'    : 3306,
     'user'    : 'root',
     'password': 'jeet123',
-    'database': 'retinascan_db'
+    'database': 'retinascan_db',
 }
+
+# ── Constants ─────────────────────────────────────────────────────────────────
+MODEL_VERSION_82PCT = 'EfficientNetB4_v82pct'   # Tag for the new 82% model
+MODEL_VERSION_OLD   = 'EfficientNetB3_v1'        # Tag for the old model
 
 GRADE_NAMES = [
     'No DR',
     'Mild DR',
     'Moderate DR',
     'Severe DR',
-    'Proliferative DR'
+    'Proliferative DR',
 ]
 
-# ── Connection ────────────────────────────────────────────────────────────────
+RISK_LEVELS = {
+    0: 'Low',
+    1: 'Low-Medium',
+    2: 'Medium',
+    3: 'High',
+    4: 'Critical',
+}
+
+
+# ── Connection ─────────────────────────────────────────────────────────────────
 def get_connection():
+    """Return a live MySQL connection or None on failure."""
     try:
         conn = mysql.connector.connect(**DB_CONFIG)
         return conn
     except Error as e:
-        print(f"Connection error: {e}")
+        print(f"[DB] Connection error: {e}")
         return None
 
 
-# ── Setup ─────────────────────────────────────────────────────────────────────
-def setup_database():
+# ── Setup ──────────────────────────────────────────────────────────────────────
+def setup_new_database():
+    """
+    Create the 'retinascan_db' database (if needed) and the new 'scans' table.
+
+    The 'scans' table is NEW — it does NOT modify the existing 'patients' table,
+    so legacy data is preserved. Both tables can coexist.
+
+    New columns vs the old 'patients' table:
+      + all_probabilities : JSON array of 5 softmax scores
+      + gradcam_path      : Filesystem path to the saved Grad-CAM overlay PNG
+      + model_version     : String tag identifying which model made the prediction
+      + risk_level        : Human-readable risk category
+    """
     try:
+        # Connect without selecting a database first
         conn = mysql.connector.connect(
-            host     = DB_CONFIG['host'],
-            port     = DB_CONFIG['port'],
-            user     = DB_CONFIG['user'],
-            password = DB_CONFIG['password']
+            host=DB_CONFIG['host'],
+            port=DB_CONFIG['port'],
+            user=DB_CONFIG['user'],
+            password=DB_CONFIG['password'],
         )
         cursor = conn.cursor()
+
         cursor.execute("CREATE DATABASE IF NOT EXISTS retinascan_db")
         cursor.execute("USE retinascan_db")
+
         cursor.execute("""
-            CREATE TABLE IF NOT EXISTS patients (
-                id           INT AUTO_INCREMENT PRIMARY KEY,
-                patient_name VARCHAR(100) NOT NULL,
-                patient_age  INT,
-                eye_side     VARCHAR(20),
-                grade        INT NOT NULL,
-                grade_name   VARCHAR(50) NOT NULL,
-                confidence   FLOAT NOT NULL,
-                scan_date    DATETIME NOT NULL,
-                notes        TEXT
+            CREATE TABLE IF NOT EXISTS scans (
+                id                  INT AUTO_INCREMENT PRIMARY KEY,
+                patient_name        VARCHAR(100) NOT NULL,
+                patient_age         INT,
+                eye_side            VARCHAR(20),
+                grade               INT NOT NULL,
+                grade_name          VARCHAR(50) NOT NULL,
+                confidence          FLOAT NOT NULL,
+                all_probabilities   JSON,
+                gradcam_path        VARCHAR(500),
+                model_version       VARCHAR(100) NOT NULL DEFAULT 'EfficientNetB4_v82pct',
+                risk_level          VARCHAR(30),
+                scan_date           DATETIME NOT NULL,
+                notes               TEXT,
+                INDEX idx_patient   (patient_name),
+                INDEX idx_grade     (grade),
+                INDEX idx_model     (model_version),
+                INDEX idx_scan_date (scan_date)
             )
         """)
+
         conn.commit()
         cursor.close()
         conn.close()
-        print("Database connected successfully!")
+
+        print("=" * 65)
+        print("  new_database.py — Setup Complete")
+        print("=" * 65)
+        print("  Database : retinascan_db")
+        print("  Table    : scans  (NEW — does not modify 'patients')")
+        print("  Columns  : id, patient_name, patient_age, eye_side,")
+        print("             grade, grade_name, confidence,")
+        print("             all_probabilities (JSON),")
+        print("             gradcam_path, model_version, risk_level,")
+        print("             scan_date, notes")
+        print("=" * 65)
+
     except Error as e:
-        print(f"Setup error: {e}")
+        print(f"[DB] Setup error: {e}")
 
 
-# ── CREATE ────────────────────────────────────────────────────────────────────
-def insert_scan(patient_name, patient_age, eye_side, grade, confidence, notes=None):
+# ── CREATE ─────────────────────────────────────────────────────────────────────
+def insert_new_scan(
+    patient_name: str,
+    patient_age: int,
+    eye_side: str,
+    grade: int,
+    confidence: float,
+    all_probabilities: list = None,
+    gradcam_path: str = None,
+    model_version: str = MODEL_VERSION_82PCT,
+    notes: str = None,
+) -> int:
+    """
+    Insert a new scan record into the 'scans' table.
+
+    Args:
+        patient_name     : Patient's full name
+        patient_age      : Age in years
+        eye_side         : 'Left Eye', 'Right Eye', or 'Both'
+        grade            : DR grade 0–4
+        confidence       : Model's confidence for the predicted class (0–1)
+        all_probabilities: List of 5 softmax scores (one per class)
+        gradcam_path     : Path to the saved Grad-CAM PNG overlay
+        model_version    : Identifier for the model used (default: 82% model)
+        notes            : Optional clinical notes
+
+    Returns:
+        Inserted record ID (int) or None on failure
+    """
     conn = get_connection()
     if not conn:
         return None
+
     try:
         cursor = conn.cursor()
+        probs_json = json.dumps(all_probabilities) if all_probabilities else None
+
         query = """
-            INSERT INTO patients
-                (patient_name, patient_age, eye_side, grade, grade_name, confidence, scan_date, notes)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            INSERT INTO scans
+                (patient_name, patient_age, eye_side,
+                 grade, grade_name, confidence, all_probabilities,
+                 gradcam_path, model_version, risk_level,
+                 scan_date, notes)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """
         values = (
-            patient_name, patient_age, eye_side, grade,
-            GRADE_NAMES[grade], round(confidence, 4),
-            datetime.datetime.now(), notes
+            patient_name,
+            patient_age,
+            eye_side,
+            grade,
+            GRADE_NAMES[grade],
+            round(confidence, 6),
+            probs_json,
+            gradcam_path,
+            model_version,
+            RISK_LEVELS[grade],
+            datetime.datetime.now(),
+            notes,
         )
+
         cursor.execute(query, values)
         conn.commit()
         record_id = cursor.lastrowid
-        print(f"Record inserted! ID: {record_id} | Patient: {patient_name} | Grade: {GRADE_NAMES[grade]}")
+
+        print(
+            f"[DB] Inserted scan #{record_id} | "
+            f"Patient: {patient_name} | "
+            f"Grade: {GRADE_NAMES[grade]} ({confidence*100:.1f}%) | "
+            f"Model: {model_version}"
+        )
         return record_id
+
     except Error as e:
-        print(f"Insert error: {e}")
+        print(f"[DB] Insert error: {e}")
         return None
     finally:
         cursor.close()
         conn.close()
 
 
-# ── READ ──────────────────────────────────────────────────────────────────────
-def get_all_scans():
+def insert_scan_from_result(
+    patient_name: str,
+    patient_age: int,
+    eye_side: str,
+    prediction_result: dict,
+    notes: str = None,
+) -> int:
+    """
+    Convenience wrapper: insert from the dict returned by predict_with_gradcam().
+
+    Args:
+        patient_name     : Patient's full name
+        patient_age      : Age in years
+        eye_side         : 'Left Eye', 'Right Eye', or 'Both'
+        prediction_result: Dict from new_model_utils.predict_with_gradcam()
+        notes            : Optional clinical notes
+
+    Returns:
+        Inserted record ID or None
+    """
+    return insert_new_scan(
+        patient_name=patient_name,
+        patient_age=patient_age,
+        eye_side=eye_side,
+        grade=prediction_result['grade'],
+        confidence=prediction_result['confidence'],
+        all_probabilities=prediction_result.get('all_probabilities'),
+        gradcam_path=prediction_result.get('gradcam_saved_path'),
+        model_version=MODEL_VERSION_82PCT,
+        notes=notes,
+    )
+
+
+# ── READ ───────────────────────────────────────────────────────────────────────
+def get_all_new_scans(model_version: str = None) -> list:
+    """
+    Fetch all scan records, optionally filtered by model version.
+
+    Args:
+        model_version: If given, filter to only this model's records
+
+    Returns:
+        List of tuples (all columns in 'scans' table)
+    """
     conn = get_connection()
     if not conn:
         return []
     try:
         cursor = conn.cursor()
-        cursor.execute("SELECT * FROM patients ORDER BY scan_date DESC")
+        if model_version:
+            cursor.execute(
+                "SELECT * FROM scans WHERE model_version = %s ORDER BY scan_date DESC",
+                (model_version,),
+            )
+        else:
+            cursor.execute("SELECT * FROM scans ORDER BY scan_date DESC")
         return cursor.fetchall()
     except Error as e:
-        print(f"Read error: {e}")
+        print(f"[DB] Read error: {e}")
         return []
     finally:
         cursor.close()
         conn.close()
 
 
-def get_scan_by_id(record_id):
+def get_new_scan_by_id(record_id: int) -> tuple:
+    """Fetch a single scan record by primary key."""
     conn = get_connection()
     if not conn:
         return None
     try:
         cursor = conn.cursor()
-        cursor.execute("SELECT * FROM patients WHERE id = %s", (record_id,))
+        cursor.execute("SELECT * FROM scans WHERE id = %s", (record_id,))
         return cursor.fetchone()
     except Error as e:
-        print(f"Read error: {e}")
+        print(f"[DB] Read error: {e}")
         return None
     finally:
         cursor.close()
         conn.close()
 
 
-def get_scans_by_name(patient_name):
+def search_new_scans(patient_name: str) -> list:
+    """Search scan records by patient name (case-insensitive partial match)."""
     conn = get_connection()
     if not conn:
         return []
     try:
         cursor = conn.cursor()
         cursor.execute(
-            "SELECT * FROM patients WHERE patient_name LIKE %s ORDER BY scan_date DESC",
-            (f"%{patient_name}%",)
+            "SELECT * FROM scans WHERE patient_name LIKE %s ORDER BY scan_date DESC",
+            (f"%{patient_name}%",),
         )
         return cursor.fetchall()
     except Error as e:
-        print(f"Search error: {e}")
+        print(f"[DB] Search error: {e}")
         return []
     finally:
         cursor.close()
         conn.close()
 
 
-def get_stats():
+# Alias so notebook import `get_scans_by_name_new` works
+get_scans_by_name_new = search_new_scans
+
+
+def get_scan_probabilities(record_id: int) -> list:
+    """
+    Retrieve the stored all_probabilities JSON for a record.
+
+    Returns:
+        List of 5 floats (softmax scores) or [] on failure
+    """
+    conn = get_connection()
+    if not conn:
+        return []
+    try:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT all_probabilities FROM scans WHERE id = %s",
+            (record_id,),
+        )
+        row = cursor.fetchone()
+        if row and row[0]:
+            return json.loads(row[0])
+        return []
+    except Error as e:
+        print(f"[DB] Probabilities fetch error: {e}")
+        return []
+    finally:
+        cursor.close()
+        conn.close()
+
+
+# ── STATISTICS ─────────────────────────────────────────────────────────────────
+def get_new_stats(model_version: str = None) -> dict:
+    """
+    Compute aggregate statistics from the 'scans' table.
+
+    Args:
+        model_version: If given, filter to only this model's records
+
+    Returns:
+        Dict with: total, dr_detected, severe_or_worse,
+                   avg_confidence, grade_distribution, model_breakdown
+    """
     conn = get_connection()
     if not conn:
         return {}
     try:
         cursor = conn.cursor()
-        cursor.execute("SELECT COUNT(*) FROM patients")
+        where = f"WHERE model_version = '{model_version}'" if model_version else ""
+
+        cursor.execute(f"SELECT COUNT(*) FROM scans {where}")
         total = cursor.fetchone()[0]
-        cursor.execute("SELECT COUNT(*) FROM patients WHERE grade > 0")
+
+        cursor.execute(f"SELECT COUNT(*) FROM scans {where + ' AND' if where else 'WHERE'} grade > 0")
         dr_detected = cursor.fetchone()[0]
-        cursor.execute("SELECT COUNT(*) FROM patients WHERE grade >= 3")
+
+        cursor.execute(f"SELECT COUNT(*) FROM scans {where + ' AND' if where else 'WHERE'} grade >= 3")
         severe = cursor.fetchone()[0]
-        cursor.execute("SELECT AVG(confidence) FROM patients")
+
+        cursor.execute(f"SELECT AVG(confidence) FROM scans {where}")
         avg_conf = cursor.fetchone()[0]
+
+        # Grade distribution
+        grade_dist = {}
+        for g in range(5):
+            cursor.execute(
+                f"SELECT COUNT(*) FROM scans {where + ' AND' if where else 'WHERE'} grade = {g}"
+            )
+            grade_dist[g] = cursor.fetchone()[0]
+
+        # Model breakdown (when no filter)
+        if not model_version:
+            cursor.execute(
+                "SELECT model_version, COUNT(*) FROM scans GROUP BY model_version"
+            )
+            model_breakdown = dict(cursor.fetchall())
+        else:
+            model_breakdown = {model_version: total}
+
         return {
-            'total'      : total,
-            'dr_detected': dr_detected,
-            'severe'     : severe,
-            'avg_conf'   : round(avg_conf, 4) if avg_conf else 0
+            'total'           : total,
+            'dr_detected'     : dr_detected,
+            'severe_or_worse' : severe,
+            'avg_confidence'  : round(avg_conf, 6) if avg_conf else 0.0,
+            'grade_distribution': grade_dist,
+            'model_breakdown' : model_breakdown,
         }
+
     except Error as e:
-        print(f"Stats error: {e}")
+        print(f"[DB] Stats error: {e}")
         return {}
     finally:
         cursor.close()
         conn.close()
 
 
-# ── UPDATE ────────────────────────────────────────────────────────────────────
-def update_notes(record_id, notes):
+# ── UPDATE ─────────────────────────────────────────────────────────────────────
+def update_new_notes(record_id: int, notes: str) -> bool:
+    """Update the notes field for an existing scan record."""
     conn = get_connection()
     if not conn:
         return False
     try:
         cursor = conn.cursor()
-        cursor.execute("UPDATE patients SET notes = %s WHERE id = %s", (notes, record_id))
+        cursor.execute(
+            "UPDATE scans SET notes = %s WHERE id = %s",
+            (notes, record_id),
+        )
         conn.commit()
-        if cursor.rowcount > 0:
-            print(f"Record {record_id} updated successfully!")
-            return True
+        updated = cursor.rowcount > 0
+        if updated:
+            print(f"[DB] Record #{record_id} notes updated.")
         else:
-            print(f"Record {record_id} not found.")
-            return False
+            print(f"[DB] Record #{record_id} not found.")
+        return updated
     except Error as e:
-        print(f"Update error: {e}")
+        print(f"[DB] Update error: {e}")
         return False
     finally:
         cursor.close()
         conn.close()
 
 
-def update_scan(record_id, patient_name=None, patient_age=None, eye_side=None, notes=None):
+def update_gradcam_path(record_id: int, gradcam_path: str) -> bool:
+    """Update the Grad-CAM overlay path for an existing scan record."""
     conn = get_connection()
     if not conn:
         return False
     try:
         cursor = conn.cursor()
-        fields, values = [], []
-        if patient_name is not None:
-            fields.append("patient_name = %s"); values.append(patient_name)
-        if patient_age is not None:
-            fields.append("patient_age = %s");  values.append(patient_age)
-        if eye_side is not None:
-            fields.append("eye_side = %s");     values.append(eye_side)
-        if notes is not None:
-            fields.append("notes = %s");        values.append(notes)
-        if not fields:
-            print("Nothing to update.")
-            return False
-        values.append(record_id)
-        cursor.execute(f"UPDATE patients SET {', '.join(fields)} WHERE id = %s", values)
+        cursor.execute(
+            "UPDATE scans SET gradcam_path = %s WHERE id = %s",
+            (gradcam_path, record_id),
+        )
         conn.commit()
-        if cursor.rowcount > 0:
-            print(f"Record {record_id} updated successfully!")
-            return True
+        updated = cursor.rowcount > 0
+        if updated:
+            print(f"[DB] Record #{record_id} GradCAM path updated → {gradcam_path}")
         else:
-            print(f"Record {record_id} not found.")
-            return False
+            print(f"[DB] Record #{record_id} not found.")
+        return updated
     except Error as e:
-        print(f"Update error: {e}")
+        print(f"[DB] Update error: {e}")
         return False
     finally:
         cursor.close()
         conn.close()
 
 
-# ── DELETE ────────────────────────────────────────────────────────────────────
-def delete_scan(record_id):
+# ── DELETE ─────────────────────────────────────────────────────────────────────
+def delete_new_scan(record_id: int) -> bool:
+    """Delete a single scan record by ID."""
     conn = get_connection()
     if not conn:
         return False
     try:
         cursor = conn.cursor()
-        cursor.execute("DELETE FROM patients WHERE id = %s", (record_id,))
+        cursor.execute("DELETE FROM scans WHERE id = %s", (record_id,))
         conn.commit()
-        if cursor.rowcount > 0:
-            print(f"Record {record_id} deleted successfully!")
-            return True
+        deleted = cursor.rowcount > 0
+        if deleted:
+            print(f"[DB] Record #{record_id} deleted.")
         else:
-            print(f"Record {record_id} not found.")
-            return False
+            print(f"[DB] Record #{record_id} not found.")
+        return deleted
     except Error as e:
-        print(f"Delete error: {e}")
+        print(f"[DB] Delete error: {e}")
         return False
     finally:
         cursor.close()
         conn.close()
 
 
-def delete_all_scans():
-    conn = get_connection()
-    if not conn:
-        return False
-    try:
-        cursor = conn.cursor()
-        cursor.execute("DELETE FROM patients")
-        conn.commit()
-        print(f"All records deleted. Rows affected: {cursor.rowcount}")
-        return True
-    except Error as e:
-        print(f"Delete error: {e}")
-        return False
-    finally:
-        cursor.close()
-        conn.close()
-
-
-# ── Display Helper ────────────────────────────────────────────────────────────
-def print_all_scans():
-    rows = get_all_scans()
+# ── DISPLAY ────────────────────────────────────────────────────────────────────
+def print_new_scans(model_version: str = None):
+    """Pretty-print all scan records (optionally filtered by model version)."""
+    rows = get_all_new_scans(model_version=model_version)
     if not rows:
-        print("No records found.")
+        print("[DB] No records found.")
         return
-    print("\n" + "="*95)
-    print(f"{'ID':<5} {'Name':<20} {'Age':<5} {'Eye':<12} {'Grade':<20} {'Confidence':<12} {'Date'}")
-    print("="*95)
+
+    print("\n" + "=" * 110)
+    print(
+        f"{'ID':<5} {'Name':<20} {'Age':<4} {'Eye':<12} {'Grade':<20} "
+        f"{'Conf%':<7} {'Risk':<12} {'Model':<28} {'Date'}"
+    )
+    print("=" * 110)
     for row in rows:
-        rid, name, age, eye, grade, grade_name, conf, date, notes = row
-        print(f"{rid:<5} {str(name):<20} {str(age):<5} {str(eye):<12} {str(grade_name):<20} {conf*100:<11.1f}% {date}")
-    print("="*95)
-    print(f"Total records: {len(rows)}\n")
+        (rid, name, age, eye, grade, grade_name, conf,
+         probs_json, cam_path, model_ver, risk, date, notes) = row
+        print(
+            f"{rid:<5} {str(name):<20} {str(age):<4} {str(eye):<12} "
+            f"{str(grade_name):<20} {conf*100:<7.1f} {str(risk):<12} "
+            f"{str(model_ver):<28} {date}"
+        )
+    print("=" * 110)
+    print(f"  Total records: {len(rows)}\n")
 
 
-# ── Interactive Menu ──────────────────────────────────────────────────────────
+def print_new_stats(model_version: str = None):
+    """Pretty-print database statistics."""
+    stats = get_new_stats(model_version=model_version)
+    if not stats:
+        print("[DB] Could not retrieve statistics.")
+        return
+
+    label = f" ({model_version})" if model_version else " (all models)"
+    print("\n" + "=" * 55)
+    print(f"  RetinaScan AI — Statistics{label}")
+    print("=" * 55)
+    print(f"  Total scans         : {stats['total']}")
+    print(f"  DR detected         : {stats['dr_detected']}")
+    print(f"  Severe / Critical   : {stats['severe_or_worse']}")
+    print(f"  Avg confidence      : {stats['avg_confidence']*100:.1f}%")
+    print("\n  Grade Distribution:")
+    print("-" * 45)
+    for g, count in stats['grade_distribution'].items():
+        pct = count / max(stats['total'], 1) * 100
+        print(f"    Grade {g} ({GRADE_NAMES[g]:<16}): {count:4d}  ({pct:5.1f}%)")
+    print("\n  By Model Version:")
+    print("-" * 45)
+    for mv, cnt in stats['model_breakdown'].items():
+        print(f"    {mv:<30}: {cnt:4d}")
+    print("=" * 55)
+
+
+# ── Interactive CLI (for standalone testing) ────────────────────────────────────
 if __name__ == '__main__':
-    print("\nRetinaScan AI — Patient Database")
-    print("="*40)
-
-    setup_database()
+    print("\nRetinaScan AI — New Database Module (82% EfficientNetB4)")
+    print("=" * 55)
+    setup_new_database()
 
     while True:
-        print("\nOptions:")
-        print("1. Add new patient scan")
-        print("2. View all records")
-        print("3. Search by patient name")
-        print("4. Update patient notes")
-        print("5. Delete a record")
-        print("6. View statistics")
-        print("7. Clear all records")
-        print("8. Exit")
+        print("\nOptions (new 'scans' table):")
+        print("  1. Insert test scan")
+        print("  2. View all records")
+        print("  3. Search by name")
+        print("  4. View statistics")
+        print("  5. View by model version")
+        print("  6. Update notes")
+        print("  7. Delete scan")
+        print("  8. Exit")
 
-        choice = input("\nEnter choice (1-8): ").strip()
+        choice = input("\nChoice (1-8): ").strip()
 
         if choice == '1':
-            print("\n--- Add New Patient ---")
-            name  = input("Patient name                        : ").strip()
-            age   = int(input("Patient age                         : ").strip())
-            eye   = input("Eye side (Left Eye/Right Eye/Both)  : ").strip()
-            print("DR Grade: 0=No DR, 1=Mild, 2=Moderate, 3=Severe, 4=Proliferative")
-            grade = int(input("DR Grade (0-4)                      : ").strip())
-            conf  = float(input("Confidence (0.0 - 1.0)             : ").strip())
-            notes = input("Notes (press Enter to skip)         : ").strip()
-            insert_scan(name, age, eye, grade, conf, notes or None)
+            name  = input("Patient name         : ").strip()
+            age   = int(input("Patient age          : ").strip())
+            eye   = input("Eye side             : ").strip()
+            grade = int(input("DR Grade (0-4)       : ").strip())
+            conf  = float(input("Confidence (0-1)     : ").strip())
+            notes = input("Notes (Enter=skip)   : ").strip()
+            # Simulate all_probabilities
+            probs = [0.0] * 5
+            probs[grade] = conf
+            insert_new_scan(name, age, eye, grade, conf, probs, notes=notes or None)
 
         elif choice == '2':
-            print("\n--- All Patient Records ---")
-            print_all_scans()
+            print_new_scans()
 
         elif choice == '3':
-            name    = input("Enter patient name to search: ").strip()
-            results = get_scans_by_name(name)
-            if results:
-                print(f"\nFound {len(results)} record(s):")
-                for r in results:
-                    rid, rname, age, eye, grade, grade_name, conf, date, notes = r
-                    print(f"  ID:{rid} | {rname} | Age:{age} | {grade_name} | {conf*100:.1f}% | {date}")
-            else:
-                print("No records found.")
+            name = input("Search name: ").strip()
+            rows = search_new_scans(name)
+            print(f"\nFound {len(rows)} record(s).")
+            for r in rows:
+                print(f"  ID:{r[0]} | {r[1]} | Grade:{r[4]} ({r[5]}) | {r[6]*100:.1f}% | {r[11]}")
 
         elif choice == '4':
-            print_all_scans()
-            record_id = int(input("Enter record ID to update: ").strip())
-            notes     = input("Enter new notes           : ").strip()
-            update_notes(record_id, notes)
+            print_new_stats()
 
         elif choice == '5':
-            print_all_scans()
-            record_id = int(input("Enter record ID to delete: ").strip())
-            confirm   = input(f"Are you sure? (yes/no)   : ").strip()
-            if confirm.lower() == 'yes':
-                delete_scan(record_id)
-            else:
-                print("Delete cancelled.")
+            mv = input("Model version (e.g. EfficientNetB4_v82pct): ").strip()
+            print_new_scans(model_version=mv)
 
         elif choice == '6':
-            stats = get_stats()
-            print("\n--- Database Statistics ---")
-            print(f"  Total scans    : {stats['total']}")
-            print(f"  DR detected    : {stats['dr_detected']}")
-            print(f"  Severe cases   : {stats['severe']}")
-            print(f"  Avg confidence : {stats['avg_conf']*100:.1f}%")
+            rid   = int(input("Record ID  : ").strip())
+            notes = input("New notes  : ").strip()
+            update_new_notes(rid, notes)
 
         elif choice == '7':
-            confirm = input("Delete ALL records? This cannot be undone. (yes/no): ").strip()
+            rid = int(input("Record ID to delete: ").strip())
+            confirm = input("Confirm? (yes/no): ").strip()
             if confirm.lower() == 'yes':
-                delete_all_scans()
-            else:
-                print("Cancelled.")
+                delete_new_scan(rid)
 
         elif choice == '8':
             print("Goodbye!")
             break
-
         else:
-            print("Invalid choice. Please enter 1-8.")
+            print("Invalid choice.")
