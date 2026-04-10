@@ -234,25 +234,17 @@ st.markdown("""
     [data-testid="stAppViewContainer"]:has(.login-card) {
         background: linear-gradient(135deg, #FDFCFB 0%, #E2D1C3 100%) !important;
     }
-    /* target the column to be the card itself */
-    [data-testid="column"]:has(.login-card) {
-        background: white !important;
-        padding: 40px !important;
-        border-radius: 24px !important;
-        box-shadow: 0 15px 45px rgba(0,0,0,0.1) !important;
-        margin-top: 50px !important;
+    .login-card {
+        background: white;
+        padding: 50px;
+        border-radius: 24px;
+        box-shadow: 0 15px 45px rgba(0,0,0,0.1);
+        text-align: center;
+        margin-top: 50px;
     }
-    .login-card { text-align: center; }
-    .login-logo { font-size: 4rem; margin-bottom: 10px; }
-    .login-title { font-size: 1.8rem; font-weight: 700; color: #2C3E50; margin-bottom: 5px; }
-    .login-subtitle { color: #7F8C8D; margin-bottom: 20px; font-size: 0.95rem; }
-    
-    /* Input Label Styling */
-    .stTextInput label p {
-        color: #7F8C8D !important;
-        font-weight: 600 !important;
-        margin-bottom: 5px !important;
-    }
+    .login-logo { font-size: 4rem; margin-bottom: 20px; }
+    .login-title { font-size: 1.8rem; font-weight: 700; color: #2C3E50; margin-bottom: 10px; }
+    .login-subtitle { color: #7F8C8D; margin-bottom: 30px; font-size: 0.95rem; }
 </style>
 
 
@@ -300,25 +292,29 @@ def check_auth():
 
     if not st.session_state["authenticated"]:
         # Layout columns to center the card
-        _, center, _ = st.columns([1, 1.5, 1])
+        _, center, _ = st.columns([1, 2, 1])
         with center:
-            st.markdown("<div class='login-card'>", unsafe_allow_html=True)
-            st.markdown("<div class='login-logo'>👁️‍🗨️</div>", unsafe_allow_html=True)
-            st.markdown("<div class='login-title'>Medical Portal Login</div>", unsafe_allow_html=True)
-            st.markdown("<div class='login-subtitle'>RetinaScan AI Research Suite<br><small>Authorized Personnel Only</small></div>", unsafe_allow_html=True)
+            st.markdown("""
+                <div class='login-card'>
+                    <div class='login-logo'>👁️‍🗨️</div>
+                    <div class='login-title'>Medical Portal Login</div>
+                    <div class='login-subtitle'>RetinaScan AI Research & Diagnostic Suite<br><small>Authorized Personnel Only</small></div>
+                </div>
+            """, unsafe_allow_html=True)
             
-            username = st.text_input("Username", value="admin", key="login_user")
-            st.markdown("<p style='color: #E74C3C; font-weight: 600; font-size: 0.9rem; margin-bottom: -15px;'>Portal Password</p>", unsafe_allow_html=True)
+            st.markdown("<p style='color: #E74C3C; font-weight: 600; margin-bottom: 5px;'>Username</p>", unsafe_allow_html=True)
+            username = st.text_input("Username", value="admin", key="login_user", label_visibility="collapsed")
+            
+            st.markdown("<p style='color: #E74C3C; font-weight: 600; margin-bottom: 5px; margin-top: 15px;'>Portal Password</p>", unsafe_allow_html=True)
             password = st.text_input("Portal Password", type="password", key="login_pass", placeholder="••••••••", label_visibility="collapsed")
             
             st.markdown("<br>", unsafe_allow_html=True)
-            if st.button("Access Portal", use_container_width=True):
+            if st.button("Enter Portal", use_container_width=True):
                 if username == "admin" and password == "admin123":
                     st.session_state["authenticated"] = True
                     st.rerun()
                 else:
-                    st.error("Invalid Credentials")
-            st.markdown("</div>", unsafe_allow_html=True)
+                    st.error("Access Denied: Invalid Credentials")
         st.stop()
 
 # ── Database Init ─────────────────────────────────────────────────────────────
