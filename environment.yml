@@ -1,0 +1,15 @@
+name: retinascan
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.11
+  - pip
+  - pip:
+    - streamlit
+    - tensorflow-cpu==2.17.1
+    - opencv-python-headless
+    - mysql-connector-python
+    - numpy
+    - matplotlib
+    - Pillow
