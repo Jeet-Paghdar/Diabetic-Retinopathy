@@ -1,7 +1,7 @@
 """
 RetinaScan AI v2.0 — Streamlit Web Application
 ==============================================
-Diabetic Retinopathy (DR) Detection using EfficientNetB4 (82% Accuracy)
+Diabetic Retinopathy (DR) Detection using EfficientNetB4 (82.05% Accuracy)
 Run: streamlit run webapp/newapp.py
 """
 
@@ -116,6 +116,13 @@ st.markdown("""
         box-shadow: 0 4px 20px rgba(192, 57, 43, 0.08);
         border-top: 5px solid;
         transition: all 0.3s cubic-bezier(0.25, 0.8, 0.25, 1);
+    }
+    .stat-card-uniform {
+        min-height: 320px;
+        display: flex;
+        flex-direction: column;
+        justify-content: space-between;
+        align-items: center;
     }
     .stat-card:hover {
         transform: translateY(-8px);
@@ -267,7 +274,7 @@ with st.sidebar:
     
     st.markdown("<div style='position: fixed; bottom: 20px;'>", unsafe_allow_html=True)
     st.markdown("<hr style='border: 0.5px solid rgba(255,255,255,0.2); margin: 20px 0;'>", unsafe_allow_html=True)
-    st.markdown("<p style='font-size: 0.85rem; color: rgba(255,255,255,0.7);'>EfficientNetB4<br>Accuracy: 82.02%</p>", unsafe_allow_html=True)
+    st.markdown("<p style='font-size: 0.85rem; color: rgba(255,255,255,0.7);'>EfficientNetB4<br>Accuracy: 82.05%</p>", unsafe_allow_html=True)
     st.markdown("</div>", unsafe_allow_html=True)
 
 # ── PAGE 1: DASHBOARD ─────────────────────────────────────────────────────────
@@ -343,6 +350,7 @@ elif page == "Scan & Predict":
     st.markdown("---")
     st.markdown("### 📸 Upload Retinal Image(s)")
     
+
     # ── 📸 Conditional Multi-Eye Uploaders ──
     files_to_process = []
     if eye_side == "Both Eyes":
@@ -369,7 +377,7 @@ elif page == "Scan & Predict":
             is_v, conf, reason, state = res if len(res)==4 else (res[0], res[1], res[2], "RAW")
             
             if not is_v:
-                st.markdown(f"<div class='invalid-badge'>⚠️ {label} Validation Failed ({conf:.0%})</div>")
+                st.markdown(f"<div class='invalid-badge' style='background-color: #fce4ec; color: #c2185b; padding: 10px; border-radius: 5px; border-left: 5px solid #c2185b; margin-bottom: 10px;'>⚠️ {label} Rejected: {reason}</div>", unsafe_allow_html=True)
                 if st.button(f"🚀 Bypass for {label}", key=f"bp_{label}"): is_v = True
                 else: all_valid = False
             
@@ -571,7 +579,7 @@ elif page == "Research Validation":
                 <p style='color: #7F8C8D; margin-top: 5px; font-size: 1.1rem;'>APTOS & EyePACS Combined Study (Validation Set)</p>
             </div>
             <div style='text-align: right;'>
-                <div style='font-size: 2.8rem; font-weight: 800; color: #3498DB;'>82.02%</div>
+                <div style='font-size: 2.8rem; font-weight: 800; color: #3498DB;'>82.05%</div>
                 <div style='font-size: 0.9rem; font-weight: 600; color: #3498DB; text-transform: uppercase;'>Accuracy Record</div>
             </div>
         </div>
@@ -581,7 +589,7 @@ elif page == "Research Validation":
     st.markdown("<br>", unsafe_allow_html=True)
 
     # 2. Comparative Benchmark Leaderboard
-    st.markdown("<h3 style='color: #2C3E50; margin-bottom: 20px; display: flex; align-items: center;'><span style='margin-right:10px;'>📊</span> Research Benchmark Leaderboard</h3>", unsafe_allow_html=True)
+    st.markdown("<h3 style='color: #2C3E50; margin-bottom: 20px; display: flex; align-items: center;'>Research Benchmark Leaderboard</h3>", unsafe_allow_html=True)
     
     col1, col2 = st.columns(2)
     
@@ -594,16 +602,16 @@ elif page == "Research Validation":
                     <th style='padding: 10px 5px;'>Rank</th><th style='padding: 10px 5px;'>Model</th><th style='padding: 10px 5px;'>Accuracy</th>
                 </tr>
                 <tr style='border-bottom: 1px solid #eee; color: #2C3E50; background: #E8F8F5; font-weight: bold;'>
-                    <td style='padding: 12px 5px;'>🥇 1st</td><td style='padding: 12px 5px;'>Proposed Model (B4)</td><td style='padding: 12px 5px;'>98.72%</td>
+                    <td style='padding: 12px 5px;'>1st</td><td style='padding: 12px 5px;'>Our Project (EffNet-B4)</td><td style='padding: 12px 5px;'>98.72%</td>
                 </tr>
                 <tr style='border-bottom: 1px solid #eee; color: #34495E;'>
-                    <td style='padding: 12px 5px;'>🥈 2nd</td><td style='padding: 12px 5px;'>Arora et al. (2024)</td><td style='padding: 12px 5px;'>81.10%</td>
+                    <td style='padding: 12px 5px;'>2nd</td><td style='padding: 12px 5px;'>Arora et al. (2024) [EffNet-B0]</td><td style='padding: 12px 5px;'>81.10%</td>
                 </tr>
                 <tr style='border-bottom: 1px solid #eee; color: #34495E;'>
-                    <td style='padding: 12px 5px;'>🥉 3rd</td><td style='padding: 12px 5px;'>EffNet-SVM (2025)</td><td style='padding: 12px 5px;'>80.20%</td>
+                    <td style='padding: 12px 5px;'>3rd</td><td style='padding: 12px 5px;'>EffNet-SVM (2025) [EffNetV2-S]</td><td style='padding: 12px 5px;'>80.20%</td>
                 </tr>
                 <tr style='color: #34495E;'>
-                    <td style='padding: 12px 5px;'>🎖️ 4th</td><td style='padding: 12px 5px;'>Lin & Wu (2023)</td><td style='padding: 12px 5px;'>74.40%</td>
+                    <td style='padding: 12px 5px;'>4th</td><td style='padding: 12px 5px;'>Lin & Wu (2023) [ResNet50]</td><td style='padding: 12px 5px;'>74.40%</td>
                 </tr>
             </table>
             <p style='color: #7F8C8D; font-size: 0.8rem; margin-top: 15px;'>*Comparative training log-epoch analysis on identical diagnostic subsets.</p>
@@ -619,16 +627,16 @@ elif page == "Research Validation":
                     <th style='padding: 10px 5px;'>Rank</th><th style='padding: 10px 5px;'>Model</th><th style='padding: 10px 5px;'>Accuracy</th>
                 </tr>
                 <tr style='border-bottom: 1px solid #eee; color: #2C3E50; background: #E8F8F5; font-weight: bold;'>
-                    <td style='padding: 12px 5px;'>🥇 1st</td><td style='padding: 12px 5px;'>Proposed Model (B4)</td><td style='padding: 12px 5px;'>77.40%</td>
+                    <td style='padding: 12px 5px;'>1st</td><td style='padding: 12px 5px;'>Our Project (EffNet-B4)</td><td style='padding: 12px 5px;'>77.40%</td>
                 </tr>
                 <tr style='border-bottom: 1px solid #eee; color: #34495E;'>
-                    <td style='padding: 12px 5px;'>🥈 2nd</td><td style='padding: 12px 5px;'>Arora et al. (2024)</td><td style='padding: 12px 5px;'>76.80%</td>
+                    <td style='padding: 12px 5px;'>2nd</td><td style='padding: 12px 5px;'>Arora et al. (2024) [EffNet-B0]</td><td style='padding: 12px 5px;'>76.80%</td>
                 </tr>
                 <tr style='border-bottom: 1px solid #eee; color: #34495E;'>
-                    <td style='padding: 12px 5px;'>🥉 3rd</td><td style='padding: 12px 5px;'>Lin & Wu (2023)</td><td style='padding: 12px 5px;'>74.50%</td>
+                    <td style='padding: 12px 5px;'>3rd</td><td style='padding: 12px 5px;'>Lin & Wu (2023) [ResNet50]</td><td style='padding: 12px 5px;'>74.50%</td>
                 </tr>
                 <tr style='color: #34495E;'>
-                    <td style='padding: 12px 5px;'>🎖️ 4th</td><td style='padding: 12px 5px;'>EffNet-SVM (2025)</td><td style='padding: 12px 5px;'>74.00%</td>
+                    <td style='padding: 12px 5px;'>4th</td><td style='padding: 12px 5px;'>EffNet-SVM (2025) [EffNetV2-S]</td><td style='padding: 12px 5px;'>74.00%</td>
                 </tr>
             </table>
             <p style='color: #7F8C8D; font-size: 0.8rem; margin-top: 15px;'>*Validation performed on previously unseen clinical data from the Sovitrath dataset.</p>
@@ -636,7 +644,7 @@ elif page == "Research Validation":
         """, unsafe_allow_html=True)
 
     # 3. Explainable AI (Grad-CAM)
-    st.markdown("<br><h3 style='color: #2C3E50; margin-bottom: 20px; display: flex; align-items: center;'><span style='margin-right:10px;'>🧠</span> Explainable AI (XAI) — Grad-CAM</h3>", unsafe_allow_html=True)
+    st.markdown("<br><h3 style='color: #2C3E50; margin-bottom: 20px; display: flex; align-items: center;'>Explainable AI (XAI) — Grad-CAM(Novelty)</h3>", unsafe_allow_html=True)
     
     st.markdown("""
     <div class='result-card' style='border-left: 6px solid #F39C12;'>
@@ -648,7 +656,7 @@ elif page == "Research Validation":
                 </p>
             </div>
             <div style='background: #FFF9F5; padding: 20px; border-radius: 12px;'>
-                <p style='color: #2C3E50; font-weight: 700; margin-bottom: 15px;'>🔍 Why This Grade?</p>
+                <p style='color: #2C3E50; font-weight: 700; margin-bottom: 15px;'>Why This Grade?</p>
                 <ul style='color: #34495E; font-size: 0.9rem; line-height: 1.6;'>
                     <li><b>Red Areas (Hot-spots):</b> Indicates high concentration of lesions (Hemorrhages, Hard Exudates, or Neo-vascularization).</li>
                     <li><b>Feature Localization:</b> The model cross-references hot-spots with clinical criteria defined in the ICDR framework.</li>
@@ -659,25 +667,28 @@ elif page == "Research Validation":
     </div>
     """, unsafe_allow_html=True)
 
-    # 4. Technical deep dive
-    st.markdown("<br><h3 style='color: #2C3E50; margin-bottom: 20px; display: flex; align-items: center;'><span style='margin-right:10px;'>⚙️</span> The Architecture Advantage</h3>", unsafe_allow_html=True)
+
+    # 5. Technical deep dive
+    st.markdown("<br><h3 style='color: #2C3E50; margin-bottom: 20px; display: flex; align-items: center;'>The Architecture Advantage</h3>", unsafe_allow_html=True)
     
-    c1, c2, c3 = st.columns(3)
+    c1, c2, c3, c4 = st.columns(4)
     with c1:
-        st.markdown("<div class='stat-card' style='border-color: #388E3C;'><div class='stat-label'>Proposed Resolution</div><div class='stat-number' style='color: #388E3C;'>380px</div><p style='font-size:0.85rem; color:#7F8C8D;'>Captures finer micro-aneurysms vs standard 224px models.</p></div>", unsafe_allow_html=True)
+        st.markdown("<div class='stat-card stat-card-uniform' style='border-color: #388E3C;'><div class='stat-label'>Proposed Resolution</div><div class='stat-number' style='color: #388E3C;'>380px</div><p style='font-size:0.85rem; color:#7F8C8D;'>Captures finer micro-aneurysms vs standard 224px models.</p></div>", unsafe_allow_html=True)
     with c2:
-        st.markdown("<div class='stat-card' style='border-color: #1976D2;'><div class='stat-label'>Architecture</div><div class='stat-number' style='color: #1976D2;'>EffNet-B4</div><p style='font-size:0.85rem; color:#7F8C8D;'>Better parameter efficiency vs ResNet architecture.</p></div>", unsafe_allow_html=True)
+        st.markdown("<div class='stat-card stat-card-uniform' style='border-color: #1976D2;'><div class='stat-label'>Architecture</div><div class='stat-number' style='color: #1976D2;'>EffNet-B4</div><p style='font-size:0.85rem; color:#7F8C8D;'>Better parameter efficiency vs ResNet architecture.</p></div>", unsafe_allow_html=True)
     with c3:
-        st.markdown("<div class='stat-card' style='border-color: #7B1FA2;'><div class='stat-label'>Validation Strategy</div><div class='stat-number' style='color: #7B1FA2;'>Blind Test</div><p style='font-size:0.85rem; color:#7F8C8D;'>Evaluated on 1,000 completely separate clinical images.</p></div>", unsafe_allow_html=True)
+        st.markdown("<div class='stat-card stat-card-uniform' style='border-color: #7B1FA2;'><div class='stat-label'>Validation Strategy</div><div class='stat-number' style='color: #7B1FA2;'>Blind Test</div><p style='font-size:0.85rem; color:#7F8C8D;'>Evaluated on 1,000 completely separate clinical images.</p></div>", unsafe_allow_html=True)
+    with c4:
+        st.markdown("<div class='stat-card stat-card-uniform' style='border-color: #E67E22;'><div class='stat-label'>Unified Dataset</div><div class='stat-number' style='color: #E67E22;'>EyePACS + APTOS</div><p style='font-size:0.85rem; color:#7F8C8D;'>Merged historical and modern clinical data for robust generalization.</p></div>", unsafe_allow_html=True)
 
     st.markdown(f"""
     <br><br>
-    <div style='text-align: center; background: #2C3E50; color: white; padding: 30px; border-radius: 12px; box-shadow: 0 4px 20px rgba(0,0,0,0.1);'>
-        <h3 style='color: white !important; margin:0;'>RESEARCH CONCLUSION</h3>
-        <p style='color: rgba(255,255,255,0.8); margin-top: 10px; font-size: 1.1rem;'>
-            The Proposed <b>EfficientNetB4 (RetinaScan)</b> system achieves state-of-the-art performance by maintaining 
+    <div style='text-align: center; background: #922B21; color: #FFFFFF !important; padding: 40px; border-radius: 18px; box-shadow: 0 10px 35px rgba(192, 57, 43, 0.2); border: 2px solid #C0392B;'>
+        <div style='color: #FFFFFF !important; margin:0; letter-spacing: 2px; text-transform: uppercase; font-size: 1.5rem; font-weight: 700;'>Research Conclusion</div>
+        <div style='color: #FADBD8 !important; margin-top: 15px; font-size: 1.15rem; line-height: 1.7; font-weight: 400;'>
+            <b>Our Project (EffNet-B4)</b> achieves state-of-the-art performance by maintaining 
             the highest accuracy across both internal clinical records and external blind validation sets.
-        </p>
+        </div>
     </div>
     <br><br>
     """, unsafe_allow_html=True)
@@ -720,7 +731,7 @@ elif page == "About":
             <h4 style='margin:0; color: #2C3E50;'>EfficientNetB4</h4>
             <ul style='color: #34495E; margin-top: 15px; padding-left: 20px; line-height: 1.6;'>
                 <li>Input Resolution: 380x380 px</li>
-                <li>82.02% Test Accuracy (5-Class)</li>
+                <li>82.05% Test Accuracy (5-Class)</li>
                 <li>Preprocessing: Ben Graham's Method</li>
                 <li>Architecture: Compound Scaling CNN</li>
             </ul>
