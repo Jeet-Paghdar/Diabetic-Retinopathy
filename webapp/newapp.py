@@ -404,8 +404,11 @@ elif page == "Scan & Predict":
                 try:
                     for label, img_bgr, img_state in images_ready:
                         if img_state == "RAW":
-                            temp_p = os.path.join(PROJECT_DIR, 'data', f'temp_{label.replace(" ","_")}.png')
-                            cv2.imwrite(temp_p, img_bgr)
+                            temp_dir = os.path.join(PROJECT_DIR, 'data')
+                            os.makedirs(temp_dir, exist_ok=True)
+                            temp_p = os.path.join(temp_dir, f'temp_{label.replace(" ","_")}.png')
+                            if not cv2.imwrite(temp_p, img_bgr):
+                                raise IOError(f"Failed to write temporary image to {temp_p}")
                             img_pre = ben_graham_preprocessing(temp_p, (IMG_SIZE, IMG_SIZE))
                         else:
                             img_pre = cv2.resize(img_bgr, (IMG_SIZE, IMG_SIZE), interpolation=cv2.INTER_LANCZOS4)
