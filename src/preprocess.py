@@ -81,6 +81,94 @@ def subtract_local_average(img: np.ndarray, kernel_size: int = 50) -> np.ndarray
     return cv2.addWeighted(img, 4, local_avg, -4, 128)
 
 
+# ── Retinal Image Validator ───────────────────────────────────────────────────
+
+def is_retinal_image(img_bgr, threshold=0.15):
+    """
+    Validates whether the uploaded image is a retinal fundus photograph
+    (either raw or Ben Graham preprocessed). Rejects documents, screenshots,
+    and other non-retinal images.
+
+    Returns: (is_valid, confidence, reason, state)
+      state = "PREPROCESSED" | "RAW"
+    """
+    if img_bgr is None or img_bgr.size == 0:
+        return False, 0.0, "Empty or unreadable image", "RAW"
+
+    h, w = img_bgr.shape[:2]
+    gray  = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
+    b_ch, g_ch, r_ch = cv2.split(img_bgr)
+
+    overall_mean = float(np.mean(gray))
+
+    # ── 1. Detect PREPROCESSED (Ben Graham) signature first ──────────────────
+    # If it matches our medical signature (gray-ish center near 128), we accept immediately.
+    cy, cx  = h // 2, w // 2
+    ry, rx  = int(h * 0.30), int(w * 0.30)
+    center_roi = gray[cy-ry:cy+ry, cx-rx:cx+rx]
+    center_mean = float(np.mean(center_roi))
+    center_std  = float(np.std(center_roi))
+
+    c_spread = max(float(np.mean(r_ch)), float(np.mean(g_ch)), float(np.mean(b_ch))) - \
+               min(float(np.mean(r_ch)), float(np.mean(g_ch)), float(np.mean(b_ch)))
+    
+    # Range (70 to 200) to catch various preprocessed dataset styles
+    all_near_128 = (70 < center_mean < 200)
+
+    # HARDENING: Reject Digital UIs (dark mode) which are too "flat" or symmetric.
+    # Biological padding (like in dataset images) has subtle noise/variation.
+    q_h, q_w = h // 10, w // 10
+    corner_stds = [np.std(gray[:q_h, :q_w]), np.std(gray[:q_h, -q_w:]), 
+                   np.std(gray[-q_h:, :q_w]), np.std(gray[-q_h:, -q_w:])]
+    is_mathematically_exact = all(s < 0.2 for s in corner_stds) # flat corners = screenshot
+
+    if all_near_128 and c_spread < 60 and center_std > 10 and not is_mathematically_exact:
+        return True, 0.99, "Preprocessed fundus image detected", "PREPROCESSED"
+
+    # ── 2. Hardened Intelligence RAW Eye Detection ───────────────────────────
+    
+    # A. Red/Biological Color Gamut Check (HSV)
+    hsv = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2HSV)
+    hue, sat, _ = cv2.split(hsv)
+    # Retina hues are typically Red-Orange (0-40) or (160-180)
+    eye_hue_mask = ((hue < 35) | (hue > 155)) & (sat > 40)
+    eye_pixels_ratio = np.sum(eye_hue_mask) / (h * w)
+    
+    if eye_pixels_ratio < 0.40 and overall_mean > 40:
+        if c_spread > 50:
+            return False, 0.88, "Non-biological color profile (Eye hues expected)", "RAW"
+
+    # B. Orientation Histogram check (Text vs Biology)
+    # Text/Diagram lines are perfectly straight (0/90 deg). Biological vessels are curved.
+    gx = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3)
+    gy = cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=3)
+    mag, ang = cv2.cartToPolar(gx, gy, angleInDegrees=True)
+    edge_mask = mag > 15 
+    if np.sum(edge_mask) > 100:
+        ang_mod = ang[edge_mask] % 90
+        axis_aligned = np.sum((ang_mod < 3) | (ang_mod > 87)) / len(ang_mod)
+        if axis_aligned > 0.55: # Rejection threshold at 0.55 per hardened logic
+            return False, 0.84, "High artificial symmetry (Looks like text or diagram)", "RAW"
+
+    # C. Texture & Sharpness Check (Laplacian)
+    laplacian_var = cv2.Laplacian(gray, cv2.CV_64F).var()
+    if laplacian_var > 4500: # Sharp digital edges
+        return False, 0.85, "Artificial texture (High edge density detected)", "RAW"
+
+    # D. Peak White Rejection
+    white_ratio = np.sum(gray > 250) / (h * w)
+    if white_ratio > 0.12:
+        return False, 0.90, "Too many white pixels (Likely a document)", "RAW"
+
+    # E. Aspect Ratio Lockdown
+    aspect = max(h, w) / max(min(h, w), 1)
+    if aspect > 1.55:
+        return False, 0.83, "Non-standard shape (Medical scans are square-ish)", "RAW"
+
+    # All checks passed
+    return True, 0.95, "Retinal photograph accepted (RAW)", "RAW"
+
+
 # ── EfficientNetB4-specific preprocessing ─────────────────────────────────────
 
 def ben_graham_preprocessing_b4(
@@ -383,3 +471,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+# ── Aliases for webapp compatibility ─────────────────────────────────────────
+ben_graham_preprocessing = ben_graham_preprocessing_b4
