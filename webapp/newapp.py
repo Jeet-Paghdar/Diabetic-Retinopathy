@@ -302,9 +302,12 @@ def check_auth():
                 </div>
             """, unsafe_allow_html=True)
             
-            password = st.text_input("Portal Password", type="password", key="login_pass", placeholder="••••••••")
+            username = st.text_input("Username", value="admin", key="login_user")
+            st.markdown("<p style='color: #E74C3C; font-weight: 600; margin-bottom: -15px;'>Portal Password</p>", unsafe_allow_html=True)
+            password = st.text_input("Portal Password", type="password", key="login_pass", placeholder="••••••••", label_visibility="collapsed")
+            
             if st.button("Enter Portal", use_container_width=True):
-                if password == "admin123":
+                if username == "admin" and password == "admin123":
                     st.session_state["authenticated"] = True
                     st.rerun()
                 else:
