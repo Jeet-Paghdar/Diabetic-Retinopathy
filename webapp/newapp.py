@@ -15,6 +15,17 @@ import cv2
 import sys
 import datetime
 import matplotlib.pyplot as plt
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+def safe_strftime(ts, fmt='%d %b %Y, %I:%M %p'):
+    """Safe date formatting for both MySQL (datetime) and SQLite (string)."""
+    if ts is None: return "N/A"
+    if hasattr(ts, 'strftime'): return ts.strftime(fmt)
+    try:
+        # Handle SQLite strings (ISO format)
+        return datetime.datetime.fromisoformat(str(ts)).strftime(fmt)
+    except:
+        return str(ts)
 import tensorflow as tf
 tf.get_logger().setLevel('ERROR')
 from tensorflow import keras
@@ -327,7 +338,7 @@ if page == "Dashboard":
                 </div>
                 <div style='display: flex; align-items: center; gap: 24px;'>
                     <span class='grade-badge grade-{row[4]}'>{row[5]}</span>
-                    <span style='color: #7F8C8D; font-size: 0.85rem;'>{(row[11] if hasattr(row[11], 'strftime') else __import__('datetime').datetime.fromisoformat(str(row[11]))).strftime('%d %b %Y')}</span>
+                    <span style='color: #7F8C8D; font-size: 0.85rem;'>{safe_strftime(row[11], '%d %b %Y')}</span>
                 </div>
             </div>
             """, unsafe_allow_html=True)
@@ -536,7 +547,7 @@ elif page == "Patient Records":
 <div style='color: #7F8C8D;'>Eye</div>
 <div style='color: #2C3E50; font-weight: 500;'>{eye} Eye</div>
 <div style='color: #7F8C8D;'>Scan Date</div>
-<div style='color: #2C3E50; font-weight: 500;'>{ts.strftime('%d %b %Y, %I:%M %p')}</div>
+<div style='color: #2C3E50; font-weight: 500;'>{safe_strftime(ts)}</div>
 </div>
 </div>
 <div style='flex: 1; text-align: right;'>
