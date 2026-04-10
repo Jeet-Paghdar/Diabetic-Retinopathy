@@ -231,38 +231,42 @@ st.markdown("""
     }
 
     /* ── Login Screen ── */
-    .login-container {
+    .login-wrapper {
+        position: fixed;
+        top: 0;
+        left: 0;
+        width: 100vw;
+        height: 100vh;
+        background: linear-gradient(135deg, #FDFCFB 0%, #E2D1C3 100%);
         display: flex;
         justify-content: center;
         align-items: center;
-        min-height: 80vh;
+        z-index: 99999;
     }
-    .login-box {
-        background: rgba(255, 255, 255, 0.7);
-        backdrop-filter: blur(15px);
-        padding: 50px;
-        border-radius: 24px;
-        box-shadow: 0 15px 35px rgba(192, 57, 43, 0.1);
-        border: 1px solid rgba(255, 255, 255, 0.5);
-        max-width: 450px;
+    .login-card {
+        background: white;
+        padding: 60px;
+        border-radius: 30px;
+        box-shadow: 0 25px 60px rgba(0,0,0,0.1);
+        max-width: 500px;
         width: 100%;
         text-align: center;
     }
     .login-logo {
-        font-size: 4rem;
-        margin-bottom: 20px;
-        color: #E74C3C;
+        font-size: 4.5rem;
+        margin-bottom: 25px;
     }
     .login-title {
-        font-size: 1.8rem;
+        font-size: 2rem;
         font-weight: 700;
         color: #2C3E50;
-        margin-bottom: 10px;
+        margin-bottom: 15px;
     }
     .login-subtitle {
         color: #7F8C8D;
-        margin-bottom: 30px;
-        font-size: 0.95rem;
+        margin-bottom: 40px;
+        font-size: 1rem;
+        line-height: 1.5;
     }
 </style>
 
@@ -310,26 +314,27 @@ def check_auth():
         st.session_state["authenticated"] = False
 
     if not st.session_state["authenticated"]:
-        st.markdown("<div class='login-container'>", unsafe_allow_html=True)
+        # Wrap everything in a dedicated div for centering
+        st.markdown("<div class='login-wrapper'>", unsafe_allow_html=True)
         with st.container():
             st.markdown("""
-                <div class='login-box'>
+                <div class='login-card'>
                     <div class='login-logo'>👁️‍🗨️</div>
                     <div class='login-title'>Medical Portal Login</div>
-                    <div class='login-subtitle'>Authorized RetinaScan AI Personnel Only</div>
+                    <div class='login-subtitle'>RetinaScan AI Research & Diagnostic Suite<br><small>Authorized Personnel Only</small></div>
                 </div>
             """, unsafe_allow_html=True)
             
-            # Simple login form centered
-            col1, col2, col3 = st.columns([1, 2, 1])
-            with col2:
-                password = st.text_input("Enter Portal Password", type="password", key="login_pass")
-                if st.button("Access Portal", use_container_width=True):
+            # The style below ensures these inputs float over the background appropriately
+            c1, c2, c3 = st.columns([1, 4, 1])
+            with c2:
+                password = st.text_input("Portal Password", type="password", key="login_pass", placeholder="••••••••")
+                if st.button("Enter Portal", use_container_width=True):
                     if password == "admin123":
                         st.session_state["authenticated"] = True
                         st.rerun()
                     else:
-                        st.error("Invalid credentials. Access denied.")
+                        st.error("Access Denied: Invalid Credentials")
         st.markdown("</div>", unsafe_allow_html=True)
         st.stop()
 
