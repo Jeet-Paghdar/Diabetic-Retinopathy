@@ -1,13 +1,18 @@
 """
-preprocess.py
-This implements the Ben Graham's preprocessing method for DR detection
+new_preprocess.py
+=================
+Updated preprocessing pipeline for the 82% accuracy EfficientNetB4 model.
 
-Ben Graham's Method is as below:
-1. Crop to remove black borders (circle cropping)
-2. Resize to uniform dimensions
-3. Apply local averaging and color normalization
-4. Enhance contrast using CLAHE (Contrast Limited Adaptive Histogram Equalization)
+Key changes from preprocess.py:
+  - Default output size changed to 380×380 (EfficientNetB4 native)
+  - Added `prepare_for_efficientnetb4()` — normalizes to [0,255] float32
+    (NOT [0,1] — EfficientNetB4 uses its own internal normalization)
+  - Added `preprocess_for_gradcam()` — returns both the model-ready tensor
+    AND the display-ready RGB image for Grad-CAM overlay
+  - Ben Graham pipeline is unchanged but resize target defaults to 380
 
+Usage:
+    from src.new_preprocess import preprocess_for_efficientnetb4, preprocess_for_gradcam
 """
 
 import cv2
@@ -17,523 +22,363 @@ from typing import Tuple, Optional, Union
 import os
 from tqdm import tqdm
 
+# ── Constants ─────────────────────────────────────────────────────────────────
+DEFAULT_SIZE_B4 = (380, 380)   # EfficientNetB4 native resolution
+
+
+# ── Low-level helpers (same as preprocess.py) ─────────────────────────────────
 
 def crop_image_from_gray(img: np.ndarray, tol: int = 7) -> np.ndarray:
-    """
-    Here, we crop out the black borders from image
-    
-    Args:
-        img: Input image (BGR or grayscale)
-        tol: Tolerance for black pixel detection (0-255)
-        
-    Returns:
-        Cropped image
-    """
-    # Convert to grayscale if needed
-    if img.ndim == 3:
-        gray_img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    else:
-        gray_img = img
-    
-    # Create mask of non-black pixels
-    mask = gray_img > tol
-    
-    # Find coordinates of non-black pixels
+    """Crop black borders from a retinal fundus image."""
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY) if img.ndim == 3 else img
+    mask = gray > tol
     coords = np.argwhere(mask)
-    
     if len(coords) == 0:
-        return img  # Return original if all black
-    
-    # Get bounding box
-    y_min, x_min = coords.min(axis=0)
-    y_max, x_max = coords.max(axis=0)
-    
-    # Crop the original image
-    cropped_img = img[y_min:y_max+1, x_min:x_max+1]
-    
-    return cropped_img
+        return img
+    y0, x0 = coords.min(axis=0)
+    y1, x1 = coords.max(axis=0)
+    return img[y0:y1+1, x0:x1+1]
 
 
 def circle_crop(img: np.ndarray, sigmaX: int = 10) -> np.ndarray:
     """
-    Here, we perform circular crop focusing on the retina area
-    It reduces irrelevant background and focuses model on retinal features
-    
-    Args:
-        img: Input image
-        sigmaX: Gaussian blur sigma (smoothing parameter)
-        
-    Returns:
-        Circle-cropped image
+    Circular crop — focus the model on the retina disc area by masking corners.
+    Identical to preprocess.py but extracted here for direct use.
     """
-    height, width = img.shape[:2]
-    
-    # Find center and radius
-    x_center = width // 2
-    y_center = height // 2
-    radius = min(x_center, y_center)
-    
-    # Create circular mask
-    y_coords, x_coords = np.ogrid[:height, :width]
-    mask = (x_coords - x_center)**2 + (y_coords - y_center)**2 <= radius**2
-    
-    # Apply mask
-    masked_img = img.copy()
-    masked_img[~mask] = 0  # Set pixels outside circle to black
-    
-    # Apply Gaussian blur to smooth edges
-    blurred = cv2.GaussianBlur(masked_img, (0, 0), sigmaX)
-    
-    # Crop to bounding box of circle
-    cropped = crop_image_from_gray(blurred, tol=7)
-    
-    return cropped
+    h, w = img.shape[:2]
+    cx, cy = w // 2, h // 2
+    r = min(cx, cy)
+
+    y_c, x_c = np.ogrid[:h, :w]
+    mask = (x_c - cx)**2 + (y_c - cy)**2 <= r**2
+
+    masked = img.copy()
+    masked[~mask] = 0
+
+    blurred = cv2.GaussianBlur(masked, (0, 0), sigmaX)
+    return crop_image_from_gray(blurred, tol=7)
 
 
-def apply_clahe(img: np.ndarray, clip_limit: float = 2.0, tile_grid_size: Tuple[int, int] = (8, 8)) -> np.ndarray:
-    """
-    Apply CLAHE (Contrast Limited Adaptive Histogram Equalization)
-    It enhances local contrast, making lesions more visible
-    
-    Args:
-        img: Input BGR image
-        clip_limit: Threshold for contrast limiting
-        tile_grid_size: Size of grid for histogram equalization
-        
-    Returns:
-        CLAHE-enhanced image
-    """
-    # Convert to LAB color space (better for medical images)
+def apply_clahe(
+    img: np.ndarray,
+    clip_limit: float = 2.0,
+    tile_grid_size: Tuple[int, int] = (8, 8),
+) -> np.ndarray:
+    """Apply CLAHE contrast enhancement in LAB color space."""
     lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)
-    
-    # Split into L, A, B channels
     l, a, b = cv2.split(lab)
-    
-    # Apply CLAHE to L-channel (lightness)
     clahe = cv2.createCLAHE(clipLimit=clip_limit, tileGridSize=tile_grid_size)
     cl = clahe.apply(l)
-    
-    # Merge channels back
-    limg = cv2.merge((cl, a, b))
-    
-    # Convert back to BGR
-    enhanced = cv2.cvtColor(limg, cv2.COLOR_LAB2BGR)
-    
+    enhanced = cv2.cvtColor(cv2.merge((cl, a, b)), cv2.COLOR_LAB2BGR)
     return enhanced
 
 
 def subtract_local_average(img: np.ndarray, kernel_size: int = 50) -> np.ndarray:
-    """
-    Subtract local average color to normalize illumination
-    It removes uneven lighting and background variations
-    
-    Args:
-        img: Input BGR image
-        kernel_size: Size of averaging kernel (odd number)
-        
-    Returns:
-        Normalized image
-    """
-    # Ensure kernel size is odd
+    """Subtract local Gaussian average to normalize illumination."""
     if kernel_size % 2 == 0:
         kernel_size += 1
-    
-    # Apply Gaussian blur to get local average
     local_avg = cv2.GaussianBlur(img, (kernel_size, kernel_size), 0)
-    
-    # Subtract local average (with offset to avoid negative values)
-    normalized = cv2.addWeighted(img, 4, local_avg, -4, 128)
-    
-    return normalized
+    return cv2.addWeighted(img, 4, local_avg, -4, 128)
 
 
-def ben_graham_preprocessing(
+# ── EfficientNetB4-specific preprocessing ─────────────────────────────────────
+
+def ben_graham_preprocessing_b4(
     image_path: Union[str, Path],
-    output_size: Tuple[int, int] = (512, 512),
+    output_size: Tuple[int, int] = DEFAULT_SIZE_B4,
     apply_clahe_flag: bool = True,
     apply_local_avg: bool = True,
     sigmaX: int = 10,
-    save_path: Optional[Union[str, Path]] = None
+    save_path: Optional[Union[str, Path]] = None,
 ) -> np.ndarray:
     """
-    Complete Ben Graham's preprocessing pipeline
-    
-    Pipeline:
-    1. Load image
-    2. Circle crop (remove black borders, focus on retina)
-    3. Resize to uniform dimensions
-    4. Subtract local average (normalize illumination) - optional
-    5. Apply CLAHE (enhance contrast) - optional
-    
+    Ben Graham's preprocessing pipeline tuned for EfficientNetB4 (380×380).
+
+    Steps:
+      1. Load image (BGR)
+      2. Circle crop — focus on retina
+      3. Subtract local average — normalize illumination
+      4. Resize to 380×380
+      5. Apply CLAHE — enhance contrast
+
     Args:
-        image_path: Path to input image
-        output_size: Target dimensions (height, width)
-        apply_clahe_flag: Whether to apply CLAHE enhancement
-        apply_local_avg: Whether to apply local average subtraction
-        sigmaX: Gaussian blur sigma for circle crop
-        save_path: Optional path to save processed image
-        
+        image_path      : Path to raw fundus image
+        output_size     : Target size — default (380, 380) for EfficientNetB4
+        apply_clahe_flag: Apply CLAHE enhancement (recommended: True)
+        apply_local_avg : Apply local average subtraction (recommended: True)
+        sigmaX          : Gaussian sigma for circle crop smoothing
+        save_path       : If given, save the preprocessed image here
+
     Returns:
-        Preprocessed image as numpy array
+        BGR numpy array of shape (380, 380, 3), dtype uint8
     """
-    # Read image
     img = cv2.imread(str(image_path))
-    
     if img is None:
-        raise ValueError(f"Could not read image: {image_path}")
-    
-    # Step 1: Circle crop and remove black borders
+        raise ValueError(f"Cannot read image: {image_path}")
+
     img = circle_crop(img, sigmaX=sigmaX)
-    
-    # Step 2: Subtract local average (optional)
+
     if apply_local_avg:
         img = subtract_local_average(img, kernel_size=51)
-    
-    # Step 3: Resize to uniform dimensions
+
     img = cv2.resize(img, output_size, interpolation=cv2.INTER_AREA)
-    
-    # Step 4: Apply CLAHE (optional)
+
     if apply_clahe_flag:
         img = apply_clahe(img, clip_limit=2.0, tile_grid_size=(8, 8))
-    
-    # Save if path provided
+
     if save_path:
-        save_path = Path(save_path)
-        save_path.parent.mkdir(parents=True, exist_ok=True)
+        Path(save_path).parent.mkdir(parents=True, exist_ok=True)
         cv2.imwrite(str(save_path), img)
-    
+
     return img
 
 
-def preprocess_batch(
+def prepare_for_efficientnetb4(
+    image_path: Union[str, Path],
+    output_size: Tuple[int, int] = DEFAULT_SIZE_B4,
+    apply_ben_graham: bool = True,
+) -> np.ndarray:
+    """
+    Load, optionally preprocess, and return a model-ready float32 tensor.
+
+    CRITICAL DIFFERENCE from the old pipeline:
+      - Returns pixel values in the range [0, 255] as float32
+      - Does NOT divide by 255
+      - EfficientNetB4 applies its own normalization internally
+      - Dividing by 255 here would reduce accuracy significantly
+
+    Args:
+        image_path      : Path to fundus image
+        output_size     : Target spatial size
+        apply_ben_graham: Whether to apply the circle-crop + CLAHE pipeline
+
+    Returns:
+        float32 array of shape (1, H, W, 3) — ready for model.predict()
+    """
+    if apply_ben_graham:
+        img_bgr = ben_graham_preprocessing_b4(
+            image_path, output_size=output_size,
+            apply_clahe_flag=True, apply_local_avg=True,
+        )
+    else:
+        img_bgr = cv2.imread(str(image_path))
+        if img_bgr is None:
+            raise ValueError(f"Cannot read image: {image_path}")
+        img_bgr = cv2.resize(img_bgr, output_size, interpolation=cv2.INTER_AREA)
+
+    # Convert BGR → RGB
+    img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
+
+    # Cast to float32 — DO NOT rescale! EfficientNetB4 handles it internally.
+    img_f32 = img_rgb.astype(np.float32)
+
+    return np.expand_dims(img_f32, axis=0)   # (1, 380, 380, 3)
+
+
+def preprocess_for_gradcam(
+    image_path: Union[str, Path],
+    output_size: Tuple[int, int] = DEFAULT_SIZE_B4,
+    apply_ben_graham: bool = True,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Prepare an image for BOTH model inference AND Grad-CAM overlay.
+
+    Returns two arrays:
+      * model_input : (1, H, W, 3) float32 in [0, 255] → for model.predict()
+      * display_img : (H, W, 3) uint8 RGB → used as base for Grad-CAM overlay
+
+    Args:
+        image_path      : Path to fundus image
+        output_size     : Target spatial size (default 380×380)
+        apply_ben_graham: Apply Ben Graham pipeline before inference
+
+    Returns:
+        (model_input, display_img)
+    """
+    if apply_ben_graham:
+        img_bgr = ben_graham_preprocessing_b4(
+            image_path, output_size=output_size,
+        )
+    else:
+        img_bgr = cv2.imread(str(image_path))
+        if img_bgr is None:
+            raise ValueError(f"Cannot read image: {image_path}")
+        img_bgr = cv2.resize(img_bgr, output_size, interpolation=cv2.INTER_AREA)
+
+    img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
+
+    # Model input: float32 [0,255]
+    model_input = np.expand_dims(img_rgb.astype(np.float32), axis=0)
+
+    # Display image: uint8 for visualization
+    display_img = img_rgb.astype(np.uint8)
+
+    return model_input, display_img
+
+
+# ── Batch preprocessing ────────────────────────────────────────────────────────
+
+def preprocess_batch_b4(
     input_dir: Union[str, Path],
     output_dir: Union[str, Path],
     image_ids: Optional[list] = None,
-    output_size: Tuple[int, int] = (512, 512),
+    output_size: Tuple[int, int] = DEFAULT_SIZE_B4,
     apply_clahe_flag: bool = True,
     apply_local_avg: bool = True,
-    verbose: bool = True
+    verbose: bool = True,
 ) -> dict:
     """
-    Batch preprocess multiple images
-    
+    Batch preprocess images to 380×380 for EfficientNetB4 training.
+
+    Identical flow to preprocess.py preprocess_batch(), but:
+      - Default output size is 380×380 (not 512×512)
+      - Uses the b4-tuned pipeline
+
     Args:
-        input_dir: Directory containing raw images
-        output_dir: Directory to save processed images
-        image_ids: List of image IDs to process (without extension). If None, process all
-        output_size: Target dimensions
-        apply_clahe_flag: Whether to apply CLAHE
-        apply_local_avg: Whether to apply local average subtraction
-        verbose: Whether to show progress bar
-        
+        input_dir       : Directory with raw images
+        output_dir      : Directory to save preprocessed images
+        image_ids       : List of image IDs (stems). If None, process all.
+        output_size     : Target size
+        apply_clahe_flag: Apply CLAHE
+        apply_local_avg : Apply local average subtraction
+        verbose         : Show progress bar
+
     Returns:
-        Dictionary with processing statistics
+        Dict with 'total', 'successful', 'failed', 'failed_ids'
     """
-    input_dir = Path(input_dir)
+    input_dir  = Path(input_dir)
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    
-    # Get list of images to process
+
     if image_ids is None:
-        image_files = list(input_dir.glob('*.png')) + list(input_dir.glob('*.jpg'))
-        image_ids = [f.stem for f in image_files]
-    
+        img_files = (
+            list(input_dir.glob('*.png')) +
+            list(input_dir.glob('*.jpg')) +
+            list(input_dir.glob('*.jpeg'))
+        )
+        image_ids = [f.stem for f in img_files]
+
     stats = {
-        'total': len(image_ids),
+        'total'     : len(image_ids),
         'successful': 0,
-        'failed': 0,
-        'failed_ids': []
+        'failed'    : 0,
+        'failed_ids': [],
     }
-    
-    # Process with progress bar
-    iterator = tqdm(image_ids, desc="Preprocessing") if verbose else image_ids
-    
+
+    iterator = tqdm(image_ids, desc=f"Preprocessing → {output_size[0]}px") \
+               if verbose else image_ids
+
     for img_id in iterator:
+        out_path = output_dir / f"{img_id}.png"
+        if out_path.exists():
+            stats['successful'] += 1
+            continue
+
+        # Find input path
+        in_path = None
+        for ext in ('.png', '.jpg', '.jpeg'):
+            candidate = input_dir / f"{img_id}{ext}"
+            if candidate.exists():
+                in_path = candidate
+                break
+
+        if in_path is None:
+            stats['failed'] += 1
+            stats['failed_ids'].append(img_id)
+            continue
+
         try:
-            # Find input file (try both .png and .jpg)
-            input_path = input_dir / f"{img_id}.png"
-            if not input_path.exists():
-                input_path = input_dir / f"{img_id}.jpg"
-            
-            if not input_path.exists():
-                if verbose:
-                    print(f"Warning: Could not find {img_id}")
-                stats['failed'] += 1
-                stats['failed_ids'].append(img_id)
-                continue
-            
-            # Output path
-            output_path = output_dir / f"{img_id}.png"
-            
-            # Skip if already processed
-            if output_path.exists():
-                stats['successful'] += 1
-                continue
-            
-            # Preprocess
-            ben_graham_preprocessing(
-                image_path=input_path,
+            ben_graham_preprocessing_b4(
+                image_path=in_path,
                 output_size=output_size,
                 apply_clahe_flag=apply_clahe_flag,
                 apply_local_avg=apply_local_avg,
-                save_path=output_path
+                save_path=out_path,
             )
-            
             stats['successful'] += 1
-            
         except Exception as e:
             if verbose:
-                print(f"Error processing {img_id}: {e}")
+                print(f"  Error processing {img_id}: {e}")
             stats['failed'] += 1
             stats['failed_ids'].append(img_id)
-    
-    # Print summary
+
     if verbose:
         print("\n" + "=" * 60)
-        print("PREPROCESSING SUMMARY")
+        print("  PREPROCESSING SUMMARY  (380×380 EfficientNetB4)")
         print("=" * 60)
-        print(f"Total images:      {stats['total']}")
-        print(f"Successfully processed: {stats['successful']}")
-        print(f"Failed:            {stats['failed']}")
+        print(f"  Total images   : {stats['total']}")
+        print(f"  Successful     : {stats['successful']}")
+        print(f"  Failed         : {stats['failed']}")
         if stats['failed'] > 0:
-            print(f"Failed IDs: {stats['failed_ids'][:10]}...")
+            print(f"  Failed IDs     : {stats['failed_ids'][:10]}")
         print("=" * 60)
-    
+
     return stats
 
 
-def compare_preprocessing(
+# ── Visualization helper ───────────────────────────────────────────────────────
+
+def compare_preprocessing_b4(
     image_path: Union[str, Path],
-    output_size: Tuple[int, int] = (512, 512)
+    output_size: Tuple[int, int] = DEFAULT_SIZE_B4,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """
-    Compare different preprocessing stages for visualization
-    Useful for understanding what each step does
-    
-    Args:
-        image_path: Path to input image
-        output_size: Target dimensions
-        
-    Returns:
-        Tuple of (original, cropped, normalized, final_enhanced)
-    """
-    # Original
-    original = cv2.imread(str(image_path))
-    original_resized = cv2.resize(original, output_size)
-    
-    # After circle crop
-    cropped = circle_crop(original.copy(), sigmaX=10)
-    cropped_resized = cv2.resize(cropped, output_size)
-    
-    # After local average subtraction
-    normalized = subtract_local_average(cropped_resized.copy(), kernel_size=51)
-    
-    # Final (with CLAHE)
-    final = apply_clahe(normalized.copy(), clip_limit=2.0, tile_grid_size=(8, 8))
-    
-    return original_resized, cropped_resized, normalized, final
-
-
-def load_preprocessed_image(
-    image_path: Union[str, Path],
-    normalize: bool = True
-) -> np.ndarray:
-    """
-    Load a preprocessed image and optionally normalize to [0, 1]
-    Use this when loading images for model training
-    
-    Args:
-        image_path: Path to preprocessed image
-        normalize: Whether to normalize pixel values to [0, 1]
-        
-    Returns:
-        Image array, optionally normalized
-    """
-    img = cv2.imread(str(image_path))
-    
-    if img is None:
-        raise ValueError(f"Could not read image: {image_path}")
-    
-    # Convert BGR to RGB (Keras/TensorFlow expects RGB)
-    img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-    
-    if normalize:
-        img = img.astype(np.float32) / 255.0
-    
-    return img
-
-
-def is_retinal_image(
-    img: np.ndarray,
-    min_confidence: float = 0.45
-) -> tuple:
-    """
-    Check whether an image looks like a retinal fundus photograph.
-    Uses heuristic checks based on known visual properties of fundus images:
-      1. Red channel dominance (blood vessels, optic disc)
-      2. Circular dark-border structure (fundus camera aperture)
-      3. Color histogram concentration in warm tones
-
-    Args:
-        img: Input image in BGR or RGB format (uint8, shape H×W×3)
-        min_confidence: Minimum weighted score to accept (0.0–1.0, default 0.45)
+    Return four stages of preprocessing for side-by-side visualization.
 
     Returns:
-        Tuple of (is_valid: bool, confidence: float, reason: str)
-          - is_valid   : True if the image passes the retinal check
-          - confidence : Weighted score between 0 and 1
-          - reason     : Human-readable explanation
+        (original_resized, after_crop, after_local_avg, final_clahe)
+        All are RGB uint8, shape (H, W, 3)
     """
-    if img is None or img.ndim != 3 or img.shape[2] != 3:
-        return False, 0.0, "Invalid image (must be a 3-channel color image)"
+    img_bgr = cv2.imread(str(image_path))
+    if img_bgr is None:
+        raise ValueError(f"Cannot read: {image_path}")
 
-    # Work in RGB — convert if BGR (heuristic: OpenCV loads as BGR)
-    # The caller should document which format they pass.
-    # We'll assume BGR input (consistent with cv2.imread used in this file).
-    rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB) if img.shape[2] == 3 else img
+    def to_rgb(bgr): return cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
 
-    h, w = rgb.shape[:2]
-    r, g, b = rgb[:, :, 0].astype(float), rgb[:, :, 1].astype(float), rgb[:, :, 2].astype(float)
+    # Stage 0: plain resize
+    orig = to_rgb(cv2.resize(img_bgr, output_size))
 
-    # ── 1. Red Channel Dominance Score ────────────────────────────
-    # Retinal images are strongly red-dominant (mean_R > mean_G > mean_B)
-    mean_r, mean_g, mean_b = r.mean(), g.mean(), b.mean()
+    # Stage 1: circle crop
+    cropped = to_rgb(cv2.resize(circle_crop(img_bgr.copy()), output_size))
 
-    # Avoid division by zero
-    total_mean = mean_r + mean_g + mean_b + 1e-8
-
-    # Red ratio: how much of the total brightness comes from the red channel
-    red_ratio = mean_r / total_mean  # Typical retinal: 0.42–0.55
-
-    if red_ratio > 0.40 and mean_r > mean_g:
-        red_score = min(1.0, (red_ratio - 0.35) / 0.15)
-    elif red_ratio > 0.33:
-        red_score = 0.3
-    else:
-        red_score = 0.0
-
-    # ── 2. Circular Dark Border Score ─────────────────────────────
-    # Fundus images have dark corners and bright center
-    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY) if img.shape[2] == 3 else img
-
-    # Sample corner vs center brightness
-    margin = min(h, w) // 8
-    center_region = gray[h // 4 : 3 * h // 4, w // 4 : 3 * w // 4]
-    corners = np.concatenate([
-        gray[:margin, :margin].ravel(),
-        gray[:margin, -margin:].ravel(),
-        gray[-margin:, :margin].ravel(),
-        gray[-margin:, -margin:].ravel()
-    ])
-
-    center_brightness = center_region.mean()
-    corner_brightness = corners.mean()
-
-    # Retinal images: corners are much darker than center
-    if corner_brightness < 50 and center_brightness > 60:
-        circle_score = min(1.0, (center_brightness - corner_brightness) / 100.0)
-    elif corner_brightness < center_brightness * 0.6:
-        circle_score = 0.5
-    else:
-        circle_score = 0.1
-
-    # ── 3. Color Histogram Score ──────────────────────────────────
-    # Retinal images have concentrated, non-uniform histograms
-    # with significant spread in the red channel
-    r_hist = cv2.calcHist([rgb[:, :, 0]], [0], None, [256], [0, 256]).ravel()
-    g_hist = cv2.calcHist([rgb[:, :, 1]], [0], None, [256], [0, 256]).ravel()
-
-    # Normalize
-    r_hist = r_hist / (r_hist.sum() + 1e-8)
-    g_hist = g_hist / (g_hist.sum() + 1e-8)
-
-    # Check that the red histogram isn't concentrated in a single spike
-    # (which would indicate a solid-color or test image)
-    r_nonzero_bins = np.sum(r_hist > 0.001)
-    g_nonzero_bins = np.sum(g_hist > 0.001)
-
-    # Retinal images typically have 30-150 active bins in red channel
-    if 20 < r_nonzero_bins < 200 and 10 < g_nonzero_bins < 200:
-        hist_score = min(1.0, r_nonzero_bins / 80.0)
-    elif r_nonzero_bins < 10:
-        hist_score = 0.0  # Too uniform → likely not retinal
-    else:
-        hist_score = 0.3
-
-    # ── Weighted Combination ──────────────────────────────────────
-    # Red dominance is the strongest signal, circular border next
-    confidence = (
-        0.40 * red_score +
-        0.35 * circle_score +
-        0.25 * hist_score
+    # Stage 2: + local average subtraction
+    local_avg_img = subtract_local_average(
+        cv2.resize(circle_crop(img_bgr.copy()), output_size)
     )
+    normalized = to_rgb(local_avg_img)
 
-    is_valid = confidence >= min_confidence
+    # Stage 3: + CLAHE
+    final = to_rgb(apply_clahe(local_avg_img.copy()))
 
-    # Build reason string
-    if is_valid:
-        reason = (
-            f"Image appears to be a retinal fundus photograph "
-            f"(confidence: {confidence:.0%})"
-        )
-    else:
-        failing = []
-        if red_score < 0.3:
-            failing.append("lacks red-channel dominance typical of retinal images")
-        if circle_score < 0.3:
-            failing.append("no circular dark-border structure detected")
-        if hist_score < 0.3:
-            failing.append("color histogram doesn't match retinal patterns")
-        reason = (
-            f"This does NOT appear to be a retinal fundus image "
-            f"(confidence: {confidence:.0%}). "
-            + "; ".join(failing).capitalize()
-        )
-
-    return is_valid, confidence, reason
+    return orig, cropped, normalized, final
 
 
+# ── Standalone demo ────────────────────────────────────────────────────────────
 def main():
-    """
-    Demo of preprocessing functions
-    Run: python src/preprocess.py
-    """
-    print("\n" + "=" * 60)
-    print("Ben Graham's Preprocessing - Demo")
-    print("=" * 60)
-    
-    # Example: preprocess a single image
-    print("\n📸 Example: Preprocessing a single image")
-    print("-" * 60)
-    
-    # Note: Update this path to an actual image from your dataset
-    sample_image = "data/raw/train_images/000c1434d8d7.png"
-    
-    if Path(sample_image).exists():
-        print(f"Input: {sample_image}")
-        
-        processed = ben_graham_preprocessing(
-            image_path=sample_image,
-            output_size=(512, 512),
-            save_path="data/processed/sample_processed.png"
-        )
-        
-        print(f"✓ Processed image saved to: data/processed/sample_processed.png")
-        print(f"  Shape: {processed.shape}")
-        print(f"  Data type: {processed.dtype}")
-        print(f"  Value range: [{processed.min()}, {processed.max()}]")
-    else:
-        print(f"⚠️  Sample image not found: {sample_image}")
-        print("   Update the path to test preprocessing")
-    
-    print("\n" + "=" * 60)
-    print("✅ Preprocessing module ready!")
-    print("=" * 60)
-    print("\nNext steps:")
-    print("  1. Test on sample images in notebooks/02_preprocess.ipynb")
-    print("  2. Run batch processing on full dataset")
-    print("  3. Use processed images for model training")
-    print("=" * 60 + "\n")
+    print("\n" + "=" * 65)
+    print("  new_preprocess.py — EfficientNetB4 Preprocessing Demo")
+    print("=" * 65)
+
+    sample = "data/raw/train_images/000c1434d8d7.png"
+
+    if not Path(sample).exists():
+        print(f"  Sample image not found: {sample}")
+        print("  Update the path to test.")
+        return
+
+    print(f"\n  Input  : {sample}")
+
+    tensor, display = preprocess_for_gradcam(image_path=sample)
+    print(f"  Model tensor   : shape={tensor.shape}, dtype={tensor.dtype}")
+    print(f"  Pixel range    : [{tensor.min():.1f}, {tensor.max():.1f}]  ← [0,255] for EfficientNetB4")
+    print(f"  Display image  : shape={display.shape}, dtype={display.dtype}")
+
+    out_path = "data/processed_b4/sample_380px.png"
+    ben_graham_preprocessing_b4(sample, save_path=out_path)
+    print(f"\n  Saved 380px preprocessed image: {out_path}")
+
+    print("\n✅ new_preprocess.py ready for the 82% EfficientNetB4 pipeline.")
+    print("=" * 65)
 
 
 if __name__ == "__main__":
