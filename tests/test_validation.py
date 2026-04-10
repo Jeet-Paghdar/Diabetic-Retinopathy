@@ -87,7 +87,7 @@ def main():
     failed = 0
 
     for name, img, expected_valid in tests:
-        is_valid, conf, reason = is_retinal_image(img)
+        is_valid, conf, reason, state = is_retinal_image(img)
         status = "PASS" if is_valid == expected_valid else "FAIL"
         if status == "PASS":
             passed += 1
@@ -103,7 +103,7 @@ def main():
     # Test with real retinal image if available
     real_result = test_real_retinal_image()
     if real_result:
-        is_valid, conf, reason = real_result
+        is_valid, conf, reason, state = real_result
         expected = True
         status = "PASS" if is_valid == expected else "FAIL"
         if status == "PASS":
