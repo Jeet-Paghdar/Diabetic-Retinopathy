@@ -1,561 +1,522 @@
 """
-model_utils.py - RetinaScan AI Model Architectures
-====================================================
-Contains:
-- EfficientNetB3 model builder
-- ResNet50 model builder
-- Ensemble model builder
-- Shared utilities (metrics, callbacks, etc.)
+new_model_utils.py
+==================
+Updated model utilities for the 82% accuracy EfficientNetB4 model.
+Replaces the original EfficientNetB3 with EfficientNetB4 (380×380),
+and wires in Grad-CAM generation alongside prediction.
 
-WHERE TO USE:
-- Write this file on your LAPTOP in src/model_utils.py
-- This file is NEVER run directly
-- It is IMPORTED by training notebooks (04, 05, 06)
+Key differences from model_utils.py:
+  - Uses EfficientNetB4 (not B3) — larger, better for fine-grained DR grading
+  - Input size 380×380 (EfficientNetB4's native resolution)
+  - Focal Loss for class imbalance
+  - Cosine Decay LR schedule (not ReduceLROnPlateau)
+  - Integrated run_gradcam() helper — returns heatmap + overlay
+  - save_prediction_with_gradcam() — writes DB-ready result dict
+
+Usage:
+    from src.new_model_utils import build_efficientnetb4, run_gradcam
 """
 
+import os
+import cv2
 import numpy as np
 import tensorflow as tf
 from tensorflow import keras
 from tensorflow.keras import layers, models
-from tensorflow.keras.applications import EfficientNetB3, ResNet50
+from tensorflow.keras.applications import EfficientNetB4
 from tensorflow.keras.callbacks import (
-    ModelCheckpoint, EarlyStopping,
-    ReduceLROnPlateau, TensorBoard
+    ModelCheckpoint, EarlyStopping, TensorBoard
 )
-from sklearn.metrics import (
-    cohen_kappa_score, classification_report,
-    confusion_matrix, roc_auc_score
-)
+from typing import Tuple
+
+# ── Constants ─────────────────────────────────────────────────────────────────
+INPUT_SHAPE  = (380, 380, 3)
+NUM_CLASSES  = 5
+BATCH_SIZE   = 16
+
+CLASS_NAMES = [
+    'No DR',
+    'Mild DR',
+    'Moderate DR',
+    'Severe DR',
+    'Proliferative DR',
+]
+
+RISK_LEVELS = {
+    0: ('Low',      '#27ae60'),
+    1: ('Low-Med',  '#f1c40f'),
+    2: ('Medium',   '#e67e22'),
+    3: ('High',     '#e74c3c'),
+    4: ('Critical', '#8e44ad'),
+}
+
+GRADCAM_LAYER = 'top_activation'   # Last conv activation in EfficientNetB4
 
 
-# ─────────────────────────────────────────────
-# 1. EFFICIENTNETB3 MODEL
-# ─────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+# 1. MODEL BUILDER
+# ─────────────────────────────────────────────────────────────────────────────
 
-def build_efficientnet(
-    input_shape=(224, 224, 3),
-    num_classes=5,
-    dropout_rate=0.3,
-    trainable_base=False
-):
+def build_efficientnetb4(
+    input_shape: tuple = INPUT_SHAPE,
+    num_classes: int = NUM_CLASSES,
+    dropout_rate: float = 0.4,
+    fine_tune_layers: int = 0,
+) -> keras.Model:
     """
-    Build EfficientNetB3 model with ImageNet pretrained weights.
+    Build EfficientNetB4 model pre-trained on ImageNet.
 
-    Strategy:
-      Phase 1 → Freeze base, train only top layers (fast)
-      Phase 2 → Unfreeze top layers of base and fine-tune (better accuracy)
+    Training strategy (two-phase, mirroring the 82% notebook):
+      Phase 1 → Freeze base, train head only
+      Phase 2 → Unfreeze top `fine_tune_layers` layers
 
     Args:
-        input_shape   : Tuple, e.g. (224, 224, 3)
-        num_classes   : Number of output classes (5 for DR grading)
-        dropout_rate  : Dropout before final Dense layer
-        trainable_base: If True, unfreeze all base layers (use for fine-tuning)
+        input_shape      : (H, W, C) — default (380, 380, 3)
+        num_classes      : Output classes — 5 for DR grading
+        dropout_rate     : Dropout before final Dense
+        fine_tune_layers : If > 0, unfreeze the last N layers of the base
 
     Returns:
-        Compiled Keras model
+        Uncompiled Keras Model  (call compile_model_b4 separately)
     """
-    # Base model - pretrained on ImageNet
-    base_model = EfficientNetB3(
-        weights='imagenet',
-        include_top=False,          # Remove ImageNet classification head
-        input_shape=input_shape
-    )
-
-    # Phase 1: Freeze entire base model
-    base_model.trainable = trainable_base
-
-    # If fine-tuning: unfreeze only top 30 layers
-    if trainable_base:
-        for layer in base_model.layers[:-30]:
-            layer.trainable = False
-        print(f"  Fine-tuning: top 30 layers unfrozen")
-    else:
-        print(f"  Phase 1: all base layers frozen")
-
-    # Build the model
-    inputs = keras.Input(shape=input_shape)
-
-    # Base feature extraction
-    x = base_model(inputs, training=False)
-
-    # Custom classification head
-    x = layers.GlobalAveragePooling2D(name='gap')(x)
-    x = layers.BatchNormalization()(x)
-    x = layers.Dropout(dropout_rate, name='dropout_1')(x)
-    x = layers.Dense(256, activation='relu', name='dense_256')(x)
-    x = layers.BatchNormalization()(x)
-    x = layers.Dropout(dropout_rate / 2, name='dropout_2')(x)
-    outputs = layers.Dense(num_classes, activation='softmax', name='output')(x)
-
-    model = keras.Model(inputs, outputs, name='EfficientNetB3_DR')
-
-    # Count trainable parameters
-    trainable_params = sum(
-        tf.size(w).numpy() for w in model.trainable_weights
-    )
-    total_params = sum(
-        tf.size(w).numpy() for w in model.weights
-    )
-    print(f"  EfficientNetB3 built:")
-    print(f"    Total params:     {total_params:,}")
-    print(f"    Trainable params: {trainable_params:,}")
-
-    return model
-
-
-# ─────────────────────────────────────────────
-# 2. RESNET50 MODEL
-# ─────────────────────────────────────────────
-
-def build_resnet50(
-    input_shape=(224, 224, 3),
-    num_classes=5,
-    dropout_rate=0.4,
-    trainable_base=False
-):
-    """
-    Build ResNet50 model with ImageNet pretrained weights.
-
-    Args:
-        input_shape   : Tuple, e.g. (224, 224, 3)
-        num_classes   : Number of output classes (5 for DR grading)
-        dropout_rate  : Dropout before final Dense layer
-        trainable_base: If True, unfreeze top layers (fine-tuning phase)
-
-    Returns:
-        Compiled Keras model
-    """
-    # Base model
-    base_model = ResNet50(
+    # Base model — ImageNet pretrained, no top
+    base = EfficientNetB4(
         weights='imagenet',
         include_top=False,
-        input_shape=input_shape
+        input_shape=input_shape,
     )
 
-    # Phase 1: Freeze base
-    base_model.trainable = trainable_base
+    # Phase 1: freeze everything
+    base.trainable = False
 
-    # Fine-tuning: unfreeze top 40 layers
-    if trainable_base:
-        for layer in base_model.layers[:-40]:
+    # Phase 2: selectively unfreeze
+    if fine_tune_layers > 0:
+        for layer in base.layers[:-fine_tune_layers]:
             layer.trainable = False
-        print(f"  Fine-tuning: top 40 layers unfrozen")
+        for layer in base.layers[-fine_tune_layers:]:
+            layer.trainable = not isinstance(
+                layer, (layers.BatchNormalization,)
+            )
+        print(f"  Fine-tune: last {fine_tune_layers} base layers unfrozen")
+        print(f"  BatchNorm layers kept frozen (best practice)")
     else:
         print(f"  Phase 1: all base layers frozen")
 
-    # Build the model
-    inputs = keras.Input(shape=input_shape)
+    # Custom classification head
+    inputs = keras.Input(shape=input_shape, name='retina_input')
+    x = base(inputs, training=False)                        # (B, 12, 12, 1792)
+    x = layers.GlobalAveragePooling2D(name='gap')(x)        # (B, 1792)
+    x = layers.BatchNormalization(name='head_bn1')(x)
+    x = layers.Dropout(dropout_rate, name='head_drop1')(x)
+    x = layers.Dense(512, name='head_dense1')(x)
+    x = layers.Activation('relu', name='head_relu1')(x)
+    x = layers.BatchNormalization(name='head_bn2')(x)
+    x = layers.Dropout(dropout_rate * 0.5, name='head_drop2')(x)
+    outputs = layers.Dense(
+        num_classes, activation='softmax', name='predictions'
+    )(x)
 
-    x = base_model(inputs, training=False)
+    model = keras.Model(inputs, outputs, name='EfficientNetB4_DR_82pct')
 
-    # Classification head
-    x = layers.GlobalAveragePooling2D(name='gap')(x)
-    x = layers.BatchNormalization()(x)
-    x = layers.Dropout(dropout_rate, name='dropout_1')(x)
-    x = layers.Dense(512, activation='relu', name='dense_512')(x)
-    x = layers.BatchNormalization()(x)
-    x = layers.Dropout(dropout_rate / 2, name='dropout_2')(x)
-    x = layers.Dense(256, activation='relu', name='dense_256')(x)
-    x = layers.BatchNormalization()(x)
-    x = layers.Dropout(dropout_rate / 4, name='dropout_3')(x)
-    outputs = layers.Dense(num_classes, activation='softmax', name='output')(x)
+    n_train = sum(tf.size(w).numpy() for w in model.trainable_weights)
+    n_total = sum(tf.size(w).numpy() for w in model.weights)
 
-    model = keras.Model(inputs, outputs, name='ResNet50_DR')
-
-    trainable_params = sum(
-        tf.size(w).numpy() for w in model.trainable_weights
-    )
-    total_params = sum(
-        tf.size(w).numpy() for w in model.weights
-    )
-    print(f"  ResNet50 built:")
-    print(f"    Total params:     {total_params:,}")
-    print(f"    Trainable params: {trainable_params:,}")
+    print(f"\n  EfficientNetB4 built:")
+    print(f"    Total params     : {n_total:>12,}")
+    print(f"    Trainable params : {n_train:>12,}")
+    print(f"    Input            : {input_shape}")
+    print(f"    Output           : {num_classes} classes (softmax)")
 
     return model
 
 
-# ─────────────────────────────────────────────
-# 3. COMPILE HELPER
-# ─────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+# 2. FOCAL LOSS
+# ─────────────────────────────────────────────────────────────────────────────
 
-def compile_model(model, learning_rate=0.001):
+def focal_loss(gamma: float = 2.0, alpha: float = 0.25):
     """
-    Compile a model with Adam optimizer and standard metrics.
+    Focal Loss for addressing class imbalance in DR grading.
+    Down-weights easy examples so the model focuses on hard cases.
 
     Args:
-        model        : Keras model to compile
-        learning_rate: Initial learning rate
+        gamma: Focusing parameter (2.0 is standard)
+        alpha: Weighting factor for rare classes
+
+    Returns:
+        Loss function compatible with model.compile()
+    """
+    def loss_fn(y_true, y_pred):
+        y_pred = tf.clip_by_value(y_pred, 1e-8, 1.0 - 1e-8)
+        ce     = -y_true * tf.math.log(y_pred)
+        weight = alpha * y_true * tf.math.pow(1.0 - y_pred, gamma)
+        return tf.reduce_mean(tf.reduce_sum(weight * ce, axis=-1))
+
+    loss_fn.__name__ = f'focal_loss_g{gamma}_a{alpha}'
+    return loss_fn
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 3. COMPILE
+# ─────────────────────────────────────────────────────────────────────────────
+
+def compile_model_b4(
+    model: keras.Model,
+    learning_rate: float = 1e-3,
+    use_focal_loss: bool = True,
+) -> keras.Model:
+    """
+    Compile EfficientNetB4 model with Adam + Focal Loss (or cross-entropy).
+
+    Args:
+        model          : Keras model (built by build_efficientnetb4)
+        learning_rate  : Learning rate for Adam
+        use_focal_loss : Use focal loss (True) or categorical cross-entropy
 
     Returns:
         Compiled model
     """
+    loss_fn = focal_loss(gamma=2.0, alpha=0.25) if use_focal_loss \
+              else 'categorical_crossentropy'
+
     model.compile(
         optimizer=keras.optimizers.Adam(learning_rate=learning_rate),
-        loss='categorical_crossentropy',
+        loss=loss_fn,
         metrics=[
             'accuracy',
-            keras.metrics.AUC(name='auc'),
+            keras.metrics.AUC(name='auc', multi_label=False),
             keras.metrics.Precision(name='precision'),
-            keras.metrics.Recall(name='recall')
-        ]
+            keras.metrics.Recall(name='recall'),
+        ],
     )
-    print(f"  Model compiled | LR: {learning_rate}")
+
+    loss_name = 'FocalLoss' if use_focal_loss else 'CategoricalCrossEntropy'
+    print(f"  Compiled | LR={learning_rate:.2e} | Loss={loss_name}")
     return model
 
 
-# ─────────────────────────────────────────────
-# 4. CALLBACKS
-# ─────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+# 4. CALLBACKS WITH COSINE DECAY
+# ─────────────────────────────────────────────────────────────────────────────
 
-def get_callbacks(model_save_path, patience_early_stop=7, patience_lr=4):
+def get_callbacks_b4(
+    model_save_path: str,
+    total_epochs: int = 30,
+    patience_stop: int = 8,
+    use_cosine_decay: bool = True,
+):
     """
-    Standard callbacks for training.
+    Training callbacks matching the 82% accuracy notebook setup.
+
+    Uses Cosine Decay LR schedule instead of ReduceLROnPlateau for
+    smoother convergence on EfficientNetB4.
 
     Args:
-        model_save_path   : Path to save best model, e.g. 'models/efficientnet_best.keras'
-        patience_early_stop: Epochs to wait before early stopping
-        patience_lr       : Epochs to wait before reducing LR
+        model_save_path : Where to save the best model (.keras)
+        total_epochs    : Total training epochs (for cosine schedule)
+        patience_stop   : EarlyStopping patience
+        use_cosine_decay: True = cosine schedule, False = no LR schedule
 
     Returns:
         List of Keras callbacks
     """
-    callback_list = [
-        # Save best model based on val_accuracy
+    cb_list = [
         ModelCheckpoint(
             filepath=model_save_path,
             monitor='val_accuracy',
             save_best_only=True,
             mode='max',
-            verbose=1
+            verbose=1,
         ),
-
-        # Stop training if val_loss doesn't improve
         EarlyStopping(
             monitor='val_loss',
-            patience=patience_early_stop,
+            patience=patience_stop,
             restore_best_weights=True,
-            verbose=1
-        ),
-
-        # Reduce LR when val_loss plateaus
-        ReduceLROnPlateau(
-            monitor='val_loss',
-            factor=0.3,           # LR = LR * 0.3
-            patience=patience_lr,
-            min_lr=1e-7,
-            verbose=1
+            verbose=1,
         ),
     ]
 
-    print(f"  Callbacks set:")
-    print(f"    Save path      : {model_save_path}")
-    print(f"    Early stop     : patience={patience_early_stop}")
-    print(f"    LR reduction   : patience={patience_lr}, factor=0.3")
+    if use_cosine_decay:
+        def cosine_scheduler(epoch, lr):
+            """Linear warmup (3 epochs) then cosine decay."""
+            warmup = 3
+            if epoch < warmup:
+                return lr * ((epoch + 1) / warmup)
+            progress = (epoch - warmup) / max(1, total_epochs - warmup)
+            return lr * 0.5 * (1.0 + np.cos(np.pi * progress))
 
-    return callback_list
+        cb_list.append(
+            keras.callbacks.LearningRateScheduler(cosine_scheduler, verbose=0)
+        )
+        print(f"  LR schedule: Cosine Decay with {3}-epoch warmup")
+
+    print(f"  Callbacks configured:")
+    print(f"    Save path     : {model_save_path}")
+    print(f"    Early stop    : patience={patience_stop}")
+    return cb_list
 
 
-# ─────────────────────────────────────────────
-# 5. EVALUATION METRICS
-# ─────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+# 5. GRAD-CAM ENGINE
+# ─────────────────────────────────────────────────────────────────────────────
 
-def evaluate_model(model, val_generator, validation_steps, num_classes=5):
+def run_gradcam(
+    model: keras.Model,
+    img_array: np.ndarray,
+    pred_class: int,
+    last_conv_layer_name: str = GRADCAM_LAYER,
+    alpha: float = 0.45,
+) -> Tuple[np.ndarray, np.ndarray]:
     """
-    Evaluate a trained model and print all metrics.
+    Compute Grad-CAM heatmap and overlay for a single image.
+
+    This implementation correctly handles the EfficientNetB4 sub-model
+    architecture by building a dedicated grad_model that exposes the
+    last convolutional activation BEFORE GlobalAveragePooling.
 
     Args:
-        model           : Trained Keras model
-        val_generator   : Validation data generator
-        validation_steps: Number of steps to run
-        num_classes     : Number of classes
+        model               : Loaded EfficientNetB4 Keras Model
+        img_array           : Input array, shape (1, H, W, 3), float32 [0..255]
+        pred_class          : The predicted class index to visualize
+        last_conv_layer_name: Name of last conv layer inside EfficientNetB4
+        alpha               : Heatmap blending strength (0=original, 1=heatmap)
 
     Returns:
-        Dictionary with all metrics
+        heatmap : Raw normalized heatmap (H, W) float32
+        overlay : BGR overlay image (H, W, 3) uint8 — ready to save / display
     """
-    print("\n📊 Evaluating model...")
+    import tensorflow as tf
 
-    y_true = []
-    y_pred_probs = []
+    # ── Step 1: Build gradient model ─────────────────────────────────────────
+    # Locate the EfficientNetB4 sub-model inside the wrapper model
+    base_model = None
+    for layer in model.layers:
+        if isinstance(layer, keras.Model) and 'efficientnet' in layer.name.lower():
+            base_model = layer
+            break
 
-    for i in range(validation_steps):
-        X_batch, y_batch = next(val_generator)
-        preds = model.predict(X_batch, verbose=0)
-        y_true.extend(np.argmax(y_batch, axis=1))
-        y_pred_probs.extend(preds)
+    if base_model is None:
+        raise ValueError(
+            "Could not find EfficientNetB4 sub-model inside the wrapper model. "
+            "Make sure you are using build_efficientnetb4() from new_model_utils."
+        )
 
-    y_true = np.array(y_true)
-    y_pred_probs = np.array(y_pred_probs)
-    y_pred = np.argmax(y_pred_probs, axis=1)
+    # Get the target conv layer output from the base model
+    try:
+        conv_layer = base_model.get_layer(last_conv_layer_name)
+    except ValueError:
+        # Fallback: use the last layer that has 4D output
+        conv_layer = None
+        for layer in reversed(base_model.layers):
+            if len(layer.output_shape) == 4:
+                conv_layer = layer
+                break
+        if conv_layer is None:
+            raise ValueError("No suitable convolutional layer found.")
+        print(f"  [GradCAM] Fallback conv layer: {conv_layer.name}")
 
-    # Metrics
-    from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score
+    # Build a model: input → [conv_output, final_predictions]
+    grad_model = keras.Model(
+        inputs=model.inputs,
+        outputs=[conv_layer.output, model.output],
+    )
 
-    accuracy  = accuracy_score(y_true, y_pred)
-    f1        = f1_score(y_true, y_pred, average='weighted')
-    precision = precision_score(y_true, y_pred, average='weighted', zero_division=0)
-    recall    = recall_score(y_true, y_pred, average='weighted', zero_division=0)
-    kappa     = cohen_kappa_score(y_true, y_pred, weights='quadratic')
+    # ── Step 2: Compute gradients ─────────────────────────────────────────────
+    img_tensor = tf.cast(img_array, tf.float32)
+    with tf.GradientTape() as tape:
+        tape.watch(img_tensor)
+        conv_outputs, predictions = grad_model(img_tensor, training=False)
+        loss = predictions[:, pred_class]
 
-    print("\n" + "=" * 60)
-    print("  MODEL EVALUATION RESULTS")
-    print("=" * 60)
-    print(f"  Accuracy              : {accuracy:.4f} ({accuracy*100:.2f}%)")
-    print(f"  Weighted F1-Score     : {f1:.4f}")
-    print(f"  Weighted Precision    : {precision:.4f}")
-    print(f"  Weighted Recall       : {recall:.4f}")
-    print(f"  Quadratic Kappa (QWK) : {kappa:.4f}")
-    print("=" * 60)
+    grads = tape.gradient(loss, conv_outputs)          # (1, h, w, C)
 
-    print("\n  Per-class Report:")
-    class_names = [f"Grade {i}" for i in range(num_classes)]
-    print(classification_report(y_true, y_pred, target_names=class_names))
+    # ── Step 3: Pool gradients over spatial dims ──────────────────────────────
+    pooled_grads = tf.reduce_mean(grads, axis=(0, 1, 2))   # (C,)
+
+    # ── Step 4: Weight conv feature maps by pooled grads ─────────────────────
+    conv_outputs = conv_outputs[0]                     # (h, w, C)
+    heatmap = conv_outputs @ pooled_grads[..., tf.newaxis]   # (h, w, 1)
+    heatmap = tf.squeeze(heatmap)                      # (h, w)
+
+    # ReLU + normalize to [0, 1]
+    heatmap = tf.nn.relu(heatmap).numpy()
+    if heatmap.max() > 0:
+        heatmap = heatmap / heatmap.max()
+
+    # ── Step 5: Resize heatmap to original image size ────────────────────────
+    H, W = img_array.shape[1], img_array.shape[2]
+    heatmap_resized = cv2.resize(heatmap, (W, H))
+
+    # ── Step 6: Colormap → overlay ────────────────────────────────────────────
+    heatmap_uint8 = np.uint8(255 * heatmap_resized)
+    jet_colors    = cv2.applyColorMap(heatmap_uint8, cv2.COLORMAP_JET)
+
+    # Original image in BGR uint8
+    orig_bgr = cv2.cvtColor(
+        np.clip(img_array[0], 0, 255).astype(np.uint8),
+        cv2.COLOR_RGB2BGR,
+    )
+
+    overlay = cv2.addWeighted(orig_bgr, 1 - alpha, jet_colors, alpha, 0)
+
+    return heatmap_resized, overlay
+
+
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 6. PREDICTION + GRADCAM IN ONE CALL
+# ─────────────────────────────────────────────────────────────────────────────
+
+def predict_with_gradcam(
+    model: keras.Model,
+    img_array: np.ndarray,
+    output_path: str = None,
+    last_conv_layer: str = GRADCAM_LAYER,
+    alpha: float = 0.45,
+) -> dict:
+    """
+    Run prediction AND Grad-CAM in a single call.
+    Returns a structured result dict ready for database insertion.
+
+    Args:
+        model          : Loaded & compiled EfficientNetB4 model
+        img_array      : Preprocessed image (1, 380, 380, 3) float32
+        output_path    : If given, save heatmap overlay PNG to this path
+        last_conv_layer: Conv layer name for Grad-CAM
+        alpha          : Heatmap overlay blending factor
+
+    Returns:
+        result dict with keys:
+            grade, grade_name, confidence, all_probabilities,
+            risk_level, risk_color, gradcam_saved_path
+    """
+    # ── Predict ───────────────────────────────────────────────────────────────
+    probs    = model.predict(img_array, verbose=0)[0]   # (5,)
+    grade    = int(np.argmax(probs))
+    conf     = float(probs[grade])
+
+    risk_label, risk_color = RISK_LEVELS[grade]
+
+    # ── Grad-CAM ──────────────────────────────────────────────────────────────
+    heatmap, overlay = run_gradcam(
+        model=model,
+        img_array=img_array,
+        pred_class=grade,
+        last_conv_layer_name=last_conv_layer,
+        alpha=alpha,
+    )
+
+    saved_path = None
+    if output_path:
+        os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
+        cv2.imwrite(output_path, overlay)
+        saved_path = output_path
+        print(f"  GradCAM overlay saved: {output_path}")
 
     return {
-        'accuracy'  : accuracy,
-        'f1'        : f1,
-        'precision' : precision,
-        'recall'    : recall,
-        'kappa'     : kappa,
-        'y_true'    : y_true,
-        'y_pred'    : y_pred,
-        'y_pred_probs': y_pred_probs
+        'grade'            : grade,
+        'grade_name'       : CLASS_NAMES[grade],
+        'confidence'       : conf,
+        'all_probabilities': probs.tolist(),
+        'risk_level'       : risk_label,
+        'risk_color'       : risk_color,
+        'heatmap'          : heatmap,
+        'overlay'          : overlay,
+        'gradcam_saved_path': saved_path,
     }
 
 
-# ─────────────────────────────────────────────
-# 6. TWO-PHASE TRAINING HELPER
-# ─────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+# 7. EVALUATION
+# ─────────────────────────────────────────────────────────────────────────────
 
-def train_two_phase(
-    model_name,         # 'efficientnet' or 'resnet'
-    build_fn,           # build_efficientnet or build_resnet50
-    train_generator,
-    val_generator,
-    steps_per_epoch,
-    validation_steps,
-    class_weights,
-    input_shape=(224, 224, 3),
-    num_classes=5,
-    phase1_epochs=15,
-    phase2_epochs=10,
-    phase1_lr=1e-3,
-    phase2_lr=1e-5,
-    save_dir='models'
-):
+def evaluate_b4(
+    model: keras.Model,
+    val_gen,
+    num_steps: int = None,
+) -> dict:
     """
-    Two-phase training strategy:
-      Phase 1: Freeze base, train only classification head (fast, ~15 epochs)
-      Phase 2: Unfreeze top layers, fine-tune with very low LR (~10 epochs)
+    Full evaluation of the EfficientNetB4 model.
 
     Args:
-        model_name      : Name string for saving files
-        build_fn        : Function that builds the model
-        train_generator : Training data generator
-        val_generator   : Validation data generator
-        steps_per_epoch : Training steps per epoch
-        validation_steps: Validation steps per epoch
-        class_weights   : Dict of class weights for imbalance
-        input_shape     : Image input shape
-        num_classes     : Number of classes
-        phase1_epochs   : Epochs for Phase 1
-        phase2_epochs   : Epochs for Phase 2
-        phase1_lr       : Learning rate for Phase 1
-        phase2_lr       : Learning rate for Phase 2 (much lower!)
-        save_dir        : Directory to save models
+        model    : Trained model
+        val_gen  : Validation generator (no shuffle)
+        num_steps: Steps to evaluate (defaults to len(val_gen))
 
     Returns:
-        (model, phase1_history, phase2_history)
+        Dict with: accuracy, kappa, f1, precision, recall, confusion_matrix
     """
-    import os
-    os.makedirs(save_dir, exist_ok=True)
-
-    save_path = f"{save_dir}/{model_name}_best.keras"
-
-    print("\n" + "=" * 60)
-    print(f"  PHASE 1 TRAINING — {model_name.upper()}")
-    print(f"  Frozen base | LR={phase1_lr} | Epochs={phase1_epochs}")
-    print("=" * 60)
-
-    # Build with frozen base
-    model = build_fn(
-        input_shape=input_shape,
-        num_classes=num_classes,
-        trainable_base=False
-    )
-    model = compile_model(model, learning_rate=phase1_lr)
-
-    callbacks_p1 = get_callbacks(
-        save_path,
-        patience_early_stop=6,
-        patience_lr=3
+    from sklearn.metrics import (
+        accuracy_score, cohen_kappa_score,
+        f1_score, precision_score, recall_score,
+        confusion_matrix, classification_report,
     )
 
-    history1 = model.fit(
-        train_generator,
-        steps_per_epoch=steps_per_epoch,
-        epochs=phase1_epochs,
-        validation_data=val_generator,
-        validation_steps=validation_steps,
-        class_weight=class_weights,
-        callbacks=callbacks_p1,
-        verbose=1
-    )
+    if num_steps is None:
+        num_steps = len(val_gen)
 
-    print(f"\n  Phase 1 complete!")
-    print(f"  Best val_accuracy: {max(history1.history['val_accuracy']):.4f}")
+    y_true, y_pred_probs = [], []
+    for _ in range(num_steps):
+        X, y = next(val_gen)
+        preds = model.predict(X, verbose=0)
+        y_true.extend(np.argmax(y, axis=1))
+        y_pred_probs.extend(preds)
 
-    # ── Phase 2: Fine-tuning ──────────────────────────────────
-    print("\n" + "=" * 60)
-    print(f"  PHASE 2 FINE-TUNING — {model_name.upper()}")
-    print(f"  Partial unfreeze | LR={phase2_lr} | Epochs={phase2_epochs}")
-    print("=" * 60)
+    y_true       = np.array(y_true)
+    y_pred_probs = np.array(y_pred_probs)
+    y_pred       = np.argmax(y_pred_probs, axis=1)
 
-    # Rebuild with partial unfreeze
-    model = build_fn(
-        input_shape=input_shape,
-        num_classes=num_classes,
-        trainable_base=True
-    )
+    acc   = accuracy_score(y_true, y_pred)
+    kappa = cohen_kappa_score(y_true, y_pred, weights='quadratic')
+    f1    = f1_score(y_true, y_pred, average='weighted')
+    prec  = precision_score(y_true, y_pred, average='weighted', zero_division=0)
+    rec   = recall_score(y_true, y_pred, average='weighted', zero_division=0)
+    cm    = confusion_matrix(y_true, y_pred)
 
-    # Load best weights from phase 1
-    model.load_weights(save_path)
+    print("\n" + "=" * 65)
+    print("  EfficientNetB4 (82%) — Evaluation Results")
+    print("=" * 65)
+    print(f"  Accuracy              : {acc:.4f}  ({acc*100:.2f}%)")
+    print(f"  Quadratic Kappa (QWK) : {kappa:.4f}")
+    print(f"  Weighted F1           : {f1:.4f}")
+    print(f"  Weighted Precision    : {prec:.4f}")
+    print(f"  Weighted Recall       : {rec:.4f}")
+    print("=" * 65)
+    print("\n  Per-class Report:")
+    print(classification_report(y_true, y_pred, target_names=CLASS_NAMES))
 
-    # Compile with very low LR
-    model = compile_model(model, learning_rate=phase2_lr)
-
-    callbacks_p2 = get_callbacks(
-        save_path,
-        patience_early_stop=5,
-        patience_lr=3
-    )
-
-    history2 = model.fit(
-        train_generator,
-        steps_per_epoch=steps_per_epoch,
-        epochs=phase2_epochs,
-        validation_data=val_generator,
-        validation_steps=validation_steps,
-        class_weight=class_weights,
-        callbacks=callbacks_p2,
-        verbose=1
-    )
-
-    print(f"\n  Phase 2 complete!")
-    print(f"  Best val_accuracy: {max(history2.history['val_accuracy']):.4f}")
-    print(f"  Model saved to: {save_path}")
-
-    return model, history1, history2
+    return {
+        'accuracy' : acc, 'kappa': kappa, 'f1': f1,
+        'precision': prec, 'recall': rec,
+        'confusion_matrix': cm,
+        'y_true'   : y_true, 'y_pred': y_pred,
+        'y_pred_probs': y_pred_probs,
+    }
 
 
-# ─────────────────────────────────────────────
-# 7. PLOT TRAINING HISTORY
-# ─────────────────────────────────────────────
-
-def plot_training_history(history1, history2=None, model_name='Model', save_path=None):
-    """
-    Plot training accuracy, loss and AUC curves.
-    If history2 is provided, plots Phase 1 + Phase 2 together.
-
-    Args:
-        history1  : Phase 1 history object
-        history2  : Phase 2 history object (optional)
-        model_name: String for plot title
-        save_path : If provided, saves the figure to this path
-    """
-    import matplotlib.pyplot as plt
-
-    # Combine histories if both provided
-    if history2:
-        acc     = history1.history['accuracy']     + history2.history['accuracy']
-        val_acc = history1.history['val_accuracy'] + history2.history['val_accuracy']
-        loss    = history1.history['loss']         + history2.history['loss']
-        val_loss= history1.history['val_loss']     + history2.history['val_loss']
-        auc     = history1.history['auc']          + history2.history['auc']
-        val_auc = history1.history['val_auc']      + history2.history['val_auc']
-        phase1_end = len(history1.history['accuracy'])
-    else:
-        acc     = history1.history['accuracy']
-        val_acc = history1.history['val_accuracy']
-        loss    = history1.history['loss']
-        val_loss= history1.history['val_loss']
-        auc     = history1.history['auc']
-        val_auc = history1.history['val_auc']
-        phase1_end = None
-
-    epochs = range(1, len(acc) + 1)
-
-    fig, axes = plt.subplots(1, 3, figsize=(18, 5))
-    fig.suptitle(f'{model_name} — Training History', fontsize=16, fontweight='bold')
-
-    # Accuracy
-    axes[0].plot(epochs, acc,     label='Train', linewidth=2)
-    axes[0].plot(epochs, val_acc, label='Val',   linewidth=2)
-    if phase1_end:
-        axes[0].axvline(x=phase1_end, color='red', linestyle='--', alpha=0.5, label='Phase 1→2')
-    axes[0].set_title('Accuracy')
-    axes[0].set_xlabel('Epoch')
-    axes[0].set_ylabel('Accuracy')
-    axes[0].legend()
-    axes[0].grid(True, alpha=0.3)
-
-    # Loss
-    axes[1].plot(epochs, loss,     label='Train', linewidth=2)
-    axes[1].plot(epochs, val_loss, label='Val',   linewidth=2)
-    if phase1_end:
-        axes[1].axvline(x=phase1_end, color='red', linestyle='--', alpha=0.5, label='Phase 1→2')
-    axes[1].set_title('Loss')
-    axes[1].set_xlabel('Epoch')
-    axes[1].set_ylabel('Loss')
-    axes[1].legend()
-    axes[1].grid(True, alpha=0.3)
-
-    # AUC
-    axes[2].plot(epochs, auc,     label='Train', linewidth=2)
-    axes[2].plot(epochs, val_auc, label='Val',   linewidth=2)
-    if phase1_end:
-        axes[2].axvline(x=phase1_end, color='red', linestyle='--', alpha=0.5, label='Phase 1→2')
-    axes[2].set_title('AUC')
-    axes[2].set_xlabel('Epoch')
-    axes[2].set_ylabel('AUC')
-    axes[2].legend()
-    axes[2].grid(True, alpha=0.3)
-
-    plt.tight_layout()
-
-    if save_path:
-        plt.savefig(save_path, dpi=300, bbox_inches='tight')
-        print(f"  Plot saved to: {save_path}")
-
-    plt.show()
-
-
-# ─────────────────────────────────────────────
-# 8. QUICK SANITY CHECK
-# ─────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+# 8. SANITY CHECK
+# ─────────────────────────────────────────────────────────────────────────────
 
 if __name__ == '__main__':
-    print("=" * 60)
-    print("  model_utils.py — Sanity Check")
-    print("=" * 60)
+    print("=" * 65)
+    print("  new_model_utils.py — Sanity Check")
+    print("=" * 65)
 
-    print("\n[1] Building EfficientNetB3...")
-    eff_model = build_efficientnet(input_shape=(224, 224, 3), num_classes=5)
-    eff_model = compile_model(eff_model, learning_rate=1e-3)
+    print("\n[1] Building EfficientNetB4 (Phase 1 — frozen base)...")
+    model = build_efficientnetb4(INPUT_SHAPE, NUM_CLASSES, dropout_rate=0.4)
+    model = compile_model_b4(model, learning_rate=1e-3, use_focal_loss=True)
 
-    print("\n[2] Building ResNet50...")
-    res_model = build_resnet50(input_shape=(224, 224, 3), num_classes=5)
-    res_model = compile_model(res_model, learning_rate=1e-3)
+    print("\n[2] Forward pass test...")
+    dummy = np.random.randint(0, 255, (2, 380, 380, 3)).astype(np.float32)
+    out   = model.predict(dummy, verbose=0)
+    print(f"  Output shape     : {out.shape}")
+    print(f"  Softmax sums     : {out.sum(axis=1).round(4)}")
 
-    print("\n[3] Testing forward pass...")
-    dummy_input = np.random.rand(2, 224, 224, 3).astype(np.float32)
-    eff_out = eff_model.predict(dummy_input, verbose=0)
-    res_out = res_model.predict(dummy_input, verbose=0)
+    print("\n[3] Callbacks test...")
+    cbs = get_callbacks_b4('models/efficientnetb4_test.keras', total_epochs=30)
+    print(f"  Callbacks count  : {len(cbs)}")
 
-    print(f"  EfficientNet output shape : {eff_out.shape}")
-    print(f"  ResNet50 output shape     : {res_out.shape}")
-    print(f"  EfficientNet softmax sum  : {eff_out.sum(axis=1)}")
-    print(f"  ResNet50 softmax sum      : {res_out.sum(axis=1)}")
-
-    print("\n✅ All checks passed! model_utils.py is ready.")
-    print("=" * 60)
+    print("\n✅ new_model_utils.py ready for the 82% EfficientNetB4 pipeline.")
+    print("=" * 65)
