@@ -229,6 +229,41 @@ st.markdown("""
         cursor: wait !important;
         border: 1px dashed #E74C3C !important;
     }
+
+    /* ── Login Screen ── */
+    .login-container {
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        min-height: 80vh;
+    }
+    .login-box {
+        background: rgba(255, 255, 255, 0.7);
+        backdrop-filter: blur(15px);
+        padding: 50px;
+        border-radius: 24px;
+        box-shadow: 0 15px 35px rgba(192, 57, 43, 0.1);
+        border: 1px solid rgba(255, 255, 255, 0.5);
+        max-width: 450px;
+        width: 100%;
+        text-align: center;
+    }
+    .login-logo {
+        font-size: 4rem;
+        margin-bottom: 20px;
+        color: #E74C3C;
+    }
+    .login-title {
+        font-size: 1.8rem;
+        font-weight: 700;
+        color: #2C3E50;
+        margin-bottom: 10px;
+    }
+    .login-subtitle {
+        color: #7F8C8D;
+        margin-bottom: 30px;
+        font-size: 0.95rem;
+    }
 </style>
 
 
@@ -268,7 +303,39 @@ def run_inference(img_array, model):
     pred_grade = int(np.argmax(probs))
     return probs, pred_grade, float(probs[pred_grade])
 
+# ── Authentication Helper ─────────────────────────────────────────────────────
+def check_auth():
+    """Simple session-based authentication for the cloud portal."""
+    if "authenticated" not in st.session_state:
+        st.session_state["authenticated"] = False
+
+    if not st.session_state["authenticated"]:
+        st.markdown("<div class='login-container'>", unsafe_allow_html=True)
+        with st.container():
+            st.markdown("""
+                <div class='login-box'>
+                    <div class='login-logo'>👁️‍🗨️</div>
+                    <div class='login-title'>Medical Portal Login</div>
+                    <div class='login-subtitle'>Authorized RetinaScan AI Personnel Only</div>
+                </div>
+            """, unsafe_allow_html=True)
+            
+            # Simple login form centered
+            col1, col2, col3 = st.columns([1, 2, 1])
+            with col2:
+                password = st.text_input("Enter Portal Password", type="password", key="login_pass")
+                if st.button("Access Portal", use_container_width=True):
+                    if password == "admin123":
+                        st.session_state["authenticated"] = True
+                        st.rerun()
+                    else:
+                        st.error("Invalid credentials. Access denied.")
+        st.markdown("</div>", unsafe_allow_html=True)
+        st.stop()
+
 # ── Database Init ─────────────────────────────────────────────────────────────
+check_auth() # Protect the entire application
+
 try:
     setup_new_database()
     db_available = True
@@ -284,6 +351,9 @@ with st.sidebar:
     page = st.radio("Navigate", ["Dashboard", "Scan & Predict", "Patient Records", "Research Validation", "About"], label_visibility="collapsed")
     
     st.markdown("<div style='position: fixed; bottom: 20px;'>", unsafe_allow_html=True)
+    if st.button("🚪 Logout", key="logout_btn"):
+        st.session_state["authenticated"] = False
+        st.rerun()
     st.markdown("<hr style='border: 0.5px solid rgba(255,255,255,0.2); margin: 20px 0;'>", unsafe_allow_html=True)
     st.markdown("<p style='font-size: 0.85rem; color: rgba(255,255,255,0.7);'>EfficientNetB4<br>Accuracy: 82.05%</p>", unsafe_allow_html=True)
     st.markdown("</div>", unsafe_allow_html=True)
