@@ -303,14 +303,14 @@ def check_auth():
             """, unsafe_allow_html=True)
             
             st.markdown("<p style='color: #E74C3C; font-weight: 600; margin-bottom: 5px;'>Username</p>", unsafe_allow_html=True)
-            username = st.text_input("Username", value="admin", key="login_user", label_visibility="collapsed")
+            username = st.text_input("Username", placeholder="e.g. admin", key="login_user", label_visibility="collapsed")
             
             st.markdown("<p style='color: #E74C3C; font-weight: 600; margin-bottom: 5px; margin-top: 15px;'>Portal Password</p>", unsafe_allow_html=True)
             password = st.text_input("Portal Password", type="password", key="login_pass", placeholder="••••••••", label_visibility="collapsed")
             
             st.markdown("<br>", unsafe_allow_html=True)
             if st.button("Enter Portal", use_container_width=True):
-                if username == "admin" and password == "admin123":
+                if username == "admin" and password == "Jeet@0808":
                     st.session_state["authenticated"] = True
                     st.rerun()
                 else:
