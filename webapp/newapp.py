@@ -18,14 +18,23 @@ import matplotlib.pyplot as plt
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 def safe_strftime(ts, fmt='%d %b %Y, %I:%M %p'):
-    """Safe date formatting for both MySQL (datetime) and SQLite (string)."""
+    """Safe date formatting with IST (UTC+5:30) adjustment for Streamlit Cloud."""
     if ts is None: return "N/A"
-    if hasattr(ts, 'strftime'): return ts.strftime(fmt)
-    try:
-        # Handle SQLite strings (ISO format)
-        return datetime.datetime.fromisoformat(str(ts)).strftime(fmt)
-    except:
-        return str(ts)
+    
+    # 1. Convert to datetime object
+    dt = ts
+    if not hasattr(ts, 'strftime'):
+        try:
+            dt = datetime.datetime.fromisoformat(str(ts))
+        except:
+            return str(ts)
+    
+    # 2. Add IST Offset (5h 30m) if on Cloud
+    # Streamlit Cloud servers are UTC. We add the offset for the Indian Panel.
+    if os.environ.get('STREAMLIT_RUNTIME_ENV') == 'cloud' or 'streamlit' in os.getcwd():
+        dt = dt + datetime.timedelta(hours=5, minutes=30)
+        
+    return dt.strftime(fmt)
 import tensorflow as tf
 tf.get_logger().setLevel('ERROR')
 from tensorflow import keras
