@@ -71,8 +71,8 @@ st.markdown("""
     .stApp .stMarkdown p, .stApp .stMarkdown li { color: #333333 !important; }
 
     /* ── Sidebar ── */
-    section[data-testid="stSidebar"] { background: linear-gradient(180deg, #C0392B 0%, #E74C3C 40%, #F39C12 100%); color: white !important; }
-    section[data-testid="stSidebar"] [data-testid="stMarkdownContainer"] * { color: white !important; }
+    section[data-testid="stSidebar"] { background: linear-gradient(180deg, #C0392B 0%, #E74C3C 40%, #D35400 100%); color: white !important; }
+    section[data-testid="stSidebar"] [data-testid="stMarkdownContainer"] * { color: #FFFFFF !important; font-weight: 500 !important; }
 
     /* ── Glassmorphism Sidebar Navigation ── */
     div[role="radiogroup"] {
@@ -139,8 +139,8 @@ st.markdown("""
         transform: translateY(-8px);
         box-shadow: 0 12px 30px rgba(192, 57, 43, 0.15);
     }
-    .stat-label { font-size: 0.9rem; color: #7F8C8D; font-weight: 500; text-transform: uppercase; letter-spacing: 1px; }
-    .stat-number { font-size: 2.2rem; font-weight: 700; margin-top: 5px; }
+    .stat-label { font-size: 0.9rem; color: #2C3E50; font-weight: 700; text-transform: uppercase; letter-spacing: 1px; }
+    .stat-number { font-size: 2.2rem; font-weight: 800; margin-top: 5px; }
 
     /* ── Result Card ── */
     .result-card {
@@ -243,8 +243,8 @@ st.markdown("""
         margin-top: 50px;
     }
     .login-logo { font-size: 4rem; margin-bottom: 20px; }
-    .login-title { font-size: 1.8rem; font-weight: 700; color: #2C3E50; margin-bottom: 10px; }
-    .login-subtitle { color: #7F8C8D; margin-bottom: 30px; font-size: 0.95rem; }
+    .login-title { font-size: 1.8rem; font-weight: 800; color: #2C3E50; margin-bottom: 10px; }
+    .login-subtitle { color: #2C3E50; margin-bottom: 30px; font-size: 1rem; font-weight: 500; }
 </style>
 
 
@@ -302,10 +302,10 @@ def check_auth():
                 </div>
             """, unsafe_allow_html=True)
             
-            st.markdown("<p style='color: #E74C3C; font-weight: 600; margin-bottom: 5px;'>Username</p>", unsafe_allow_html=True)
+            st.markdown("<p style='color: #C0392B; font-weight: 700; margin-bottom: 5px;'>Username</p>", unsafe_allow_html=True)
             username = st.text_input("Username", placeholder="e.g. admin", key="login_user", label_visibility="collapsed")
             
-            st.markdown("<p style='color: #E74C3C; font-weight: 600; margin-bottom: 5px; margin-top: 15px;'>Portal Password</p>", unsafe_allow_html=True)
+            st.markdown("<p style='color: #C0392B; font-weight: 700; margin-bottom: 5px; margin-top: 15px;'>Portal Password</p>", unsafe_allow_html=True)
             password = st.text_input("Portal Password", type="password", key="login_pass", placeholder="••••••••", label_visibility="collapsed")
             
             st.markdown("<br>", unsafe_allow_html=True)
@@ -617,10 +617,8 @@ elif page == "Patient Records":
 </div>
 </div>""", unsafe_allow_html=True)
                 
-                # Image preview in expander to save space
-                if img_path and os.path.exists(img_path):
-                    with st.expander("🔍 View Diagnostic Scan (Grad-CAM)"):
-                        st.image(img_path, caption=f"Stored Visualization — {db_model}", use_container_width=True)
+                # Image preview removed as per user request
+
                 
                 col_del = st.columns([1, 4])[0]
                 with col_del:
@@ -752,8 +750,8 @@ elif page == "Research Validation":
     st.markdown(f"""
     <br><br>
     <div style='text-align: center; background: #922B21; color: #FFFFFF !important; padding: 40px; border-radius: 18px; box-shadow: 0 10px 35px rgba(192, 57, 43, 0.2); border: 2px solid #C0392B;'>
-        <div style='color: #FFFFFF !important; margin:0; letter-spacing: 2px; text-transform: uppercase; font-size: 1.5rem; font-weight: 700;'>Research Conclusion</div>
-        <div style='color: #FADBD8 !important; margin-top: 15px; font-size: 1.15rem; line-height: 1.7; font-weight: 400;'>
+        <div style='color: #FFFFFF !important; margin:0; letter-spacing: 2px; text-transform: uppercase; font-size: 1.5rem; font-weight: 800;'>Research Conclusion</div>
+        <div style='color: #FFFFFF !important; margin-top: 15px; font-size: 1.2rem; line-height: 1.7; font-weight: 500;'>
             <b>Our Project (EffNet-B4)</b> achieves state-of-the-art performance by maintaining 
             the highest accuracy across both internal clinical records and external blind validation sets.
         </div>
