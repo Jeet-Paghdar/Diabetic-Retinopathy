@@ -30,8 +30,8 @@ def safe_strftime(ts, fmt='%d %b %Y, %I:%M %p'):
             return str(ts)
     
     # 2. Add IST Offset (5h 30m) if on Cloud
-    # Streamlit Cloud servers are UTC. We add the offset for the Indian Panel.
-    if os.environ.get('STREAMLIT_RUNTIME_ENV') == 'cloud' or 'streamlit' in os.getcwd():
+    # Streamlit Cloud (Linux) is UTC. Local (Windows) is already local time.
+    if os.path.sep == '/' or os.environ.get('STREAMLIT_RUNTIME_ENV') == 'cloud':
         dt = dt + datetime.timedelta(hours=5, minutes=30)
         
     return dt.strftime(fmt)
