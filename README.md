@@ -9,20 +9,20 @@
 
 <br/><br/>
 
-# 🩺 RetinaScan AI
+# RetinaScan AI
 ### Automated Diabetic Retinopathy Severity Grading
 
 *A production-ready deep learning system for clinical-grade, 5-class DR detection from retinal fundus photographs — powered by EfficientNetB4, Grad-CAM explainability, and a hybrid MySQL/SQLite database.*
 
 <br/>
 
-[📖 Project Overview](#-project-overview) • [✨ Key Features](#-key-features) • [🏗 Architecture](#-system-architecture) • [📊 Results](#-model-performance) • [🚀 Quick Start](#-quick-start) • [📁 Project Structure](#-project-structure) • [🔬 Notebooks](#-research-notebooks) • [🤝 Contributing](#-contributing)
+[Project Overview](#project-overview) • [Key Features](#key-features) • [Architecture](#system-architecture) • [Results](#model-performance) • [Quick Start](#quick-start) • [Project Structure](#project-structure) • [Notebooks](#research-notebooks) • [Contributing](#contributing)
 
 </div>
 
 ---
 
-## 📖 Project Overview
+## Project Overview
 
 **Diabetic Retinopathy (DR)** is the leading cause of preventable blindness worldwide, affecting over 100 million diabetics. Early detection is critical — but ophthalmologist availability is severely limited in developing regions.
 
@@ -33,33 +33,33 @@
 - **A production web application** built on Streamlit with patient record management
 - **A hybrid database architecture** (MySQL primary + SQLite fallback) for zero-downtime reliability
 
-The system is built on a two-phase transfer learning pipeline using **EfficientNetB4** (pretrained on ImageNet) trained on the merged **APTOS 2019 + EyePACS Kaggle 2015** datasets — the two gold-standard DR grading benchmarks.
+The system is built on a three-phase transfer learning pipeline using **EfficientNetB4** (pretrained on ImageNet) trained on the merged **APTOS 2019 + EyePACS Kaggle 2015** datasets — the two gold-standard DR grading benchmarks.
 
 ---
 
-## ✨ Key Features
+## Key Features
 
 | Feature | Description |
 |---|---|
-| 🧠 **EfficientNetB4 Backbone** | Native 380×380 resolution, ImageNet pretrained, selected for its superior compound scaling for fine-grained medical image classification |
-| 🔥 **Focal Loss** | Tackles severe class imbalance (No DR cases dominate real-world datasets) by down-weighting easy negatives |
-| 📸 **Grad-CAM XAI** | Per-prediction heatmaps overlaid on the original fundus image, enabling clinicians to visually verify model decisions |
-| 🧪 **Ben Graham Preprocessing** | Circular crop + local average subtraction + CLAHE (Contrast Limited Adaptive Histogram Equalization) — the competition-winning preprocessing strategy |
-| 🌐 **Streamlit Web App** | Real-time clinical dashboard with drag-and-drop image upload, instant diagnosis, probability charts, and patient record logging |
-| 🗄️ **Hybrid Database** | MySQL primary with automatic SQLite failover — scan records, Grad-CAM paths, and model versioning all persisted |
-| 🛡️ **Retinal Image Validator** | Multi-heuristic CV filter that rejects documents, screenshots, and non-medical images before they reach the model |
-| 📏 **Two-Phase Fine-Tuning** | Phase 1 (frozen backbone, train head) → Phase 3 (progressive layer unfreezing with Cosine Decay LR) |
+| **EfficientNetB4 Backbone** | Native 380×380 resolution, ImageNet pretrained, selected for its superior compound scaling for fine-grained medical image classification |
+| **Focal Loss** | Tackles severe class imbalance (No DR cases dominate real-world datasets) by down-weighting easy negatives |
+| **Grad-CAM XAI** | Per-prediction heatmaps overlaid on the original fundus image, enabling clinicians to visually verify model decisions |
+| **Ben Graham Preprocessing** | Circular crop + local average subtraction + CLAHE (Contrast Limited Adaptive Histogram Equalization) — the competition-winning preprocessing strategy |
+| **Streamlit Web App** | Real-time clinical dashboard with drag-and-drop image upload, instant diagnosis, probability charts, and patient record logging |
+| **Hybrid Database** | MySQL primary with automatic SQLite failover — scan records, Grad-CAM paths, and model versioning all persisted |
+| **Retinal Image Validator** | Multi-heuristic CV filter that rejects documents, screenshots, and non-medical images before they reach the model |
+| **Three-Phase Fine-Tuning** | Progressive unfreezing strategy across three training phases with Cosine Decay LR schedules |
 
 ---
 
-## 🏗 System Architecture
+## System Architecture
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
 │                     RETINASCAN AI PIPELINE                   │
 └──────────────────────────────────────────────────────────────┘
 
-  📤 Upload                📷 Validate              ⚙️ Preprocess
+  Upload                  Validate                 Preprocess
   Fundus Image    ──▶    is_retinal_image()   ──▶  Ben Graham Pipeline
   (any size)             (CV heuristics)            - Circle Crop
                                                      - Local Avg Subtract
@@ -67,13 +67,13 @@ The system is built on a two-phase transfer learning pipeline using **EfficientN
                                                      - CLAHE Enhancement
                                 ▼
 
-  🧠 Inference                                      🔥 Grad-CAM
+  Inference                                         Grad-CAM
   EfficientNetB4   ──▶   5-class Softmax    ──▶   top_activation layer
   (380×380 input)        [No DR → PDR]             GradientTape
-  Focal Loss trained     + Confidence %            Heatmap + Overlay PNG
+  Label smoothing        + Confidence %            Heatmap + Overlay PNG
                                 ▼
 
-  📊 Results UI                                     🗄️ Database
+  Results UI                                        Database
   - DR Grade + Name   ──▶   Streamlit        ──▶   MySQL (primary)
   - Confidence bar           Dashboard               SQLite (fallback)
   - Probability chart        Patient Form            scans table
@@ -84,15 +84,15 @@ The system is built on a two-phase transfer learning pipeline using **EfficientN
 
 | Grade | Class | Risk Level | Description |
 |:---:|---|:---:|---|
-| 0 | No DR | 🟢 Low | No visible retinal changes |
-| 1 | Mild DR | 🟡 Low-Medium | Microaneurysms only |
-| 2 | Moderate DR | 🟠 Medium | More than microaneurysms; less than severe |
-| 3 | Severe DR | 🔴 High | Extensive hemorrhages, venous beading |
-| 4 | Proliferative DR | 🟣 Critical | Neovascularization; vitreous hemorrhage risk |
+| 0 | No DR | Low | No visible retinal changes |
+| 1 | Mild DR | Low-Medium | Microaneurysms only |
+| 2 | Moderate DR | Medium | More than microaneurysms; less than severe |
+| 3 | Severe DR | High | Extensive hemorrhages, venous beading |
+| 4 | Proliferative DR | Critical | Neovascularization; vitreous hemorrhage risk |
 
 ---
 
-## 📊 Model Performance
+## Model Performance
 
 > Evaluated on the merged **APTOS 2019 + EyePACS Kaggle 2015** holdout set.
 
@@ -138,7 +138,7 @@ Ensemble  ──  Average softmax outputs of Phase 1 + Phase 3 checkpoints
 
 ---
 
-## 🚀 Quick Start
+## Quick Start
 
 ### Prerequisites
 
@@ -174,7 +174,7 @@ models/
 └── efficientnetb4_best.keras
 ```
 
-> If you are training from scratch, run the notebooks in order (see [Research Notebooks](#-research-notebooks) below).
+> If you are training from scratch, run the notebooks in order (see [Research Notebooks](#research-notebooks) below).
 
 ### 4. Configure the Database *(Optional)*
 
@@ -201,48 +201,48 @@ The RetinaScan AI dashboard will open at `http://localhost:8501`.
 
 ---
 
-## 📁 Project Structure
+## Project Structure
 
 ```
 Diabetic-Retinopathy/
 │
-├── 📓 notebooks/                   # End-to-end research pipeline (run in order)
-│   ├── 01_eda.ipynb                # Exploratory Data Analysis on APTOS + EyePACS
-│   ├── 02_preprocess.ipynb         # APTOS preprocessing & dataset building
-│   ├── 03_baseline_model.ipynb     # Initial CNN baseline
-│   ├── 04_Preprocess_eyepacs.ipynb # EyePACS preprocessing & merge strategy
-│   ├── 05_efficientNet_training.ipynb  # Main EfficientNetB4 training notebook ⭐
+├── notebooks/                          # End-to-end research pipeline (run in order)
+│   ├── 01_eda.ipynb                    # Exploratory Data Analysis on APTOS + EyePACS
+│   ├── 02_preprocess.ipynb             # APTOS preprocessing & dataset building
+│   ├── 03_baseline_model.ipynb         # Initial CNN baseline
+│   ├── 04_Preprocess_eyepacs.ipynb     # EyePACS preprocessing & merge strategy
+│   ├── 05_efficientNet_training.ipynb  # Main EfficientNetB4 training notebook
 │   ├── 06_gradcam_efficientnetb4.ipynb # Grad-CAM generation & analysis
 │   └── 07_database_integration.ipynb   # DB schema, insertions & scan tracking
 │
-├── 🌐 webapp/
-│   └── newapp.py                   # Streamlit clinical dashboard (main app)
+├── webapp/
+│   └── newapp.py                       # Streamlit clinical dashboard (main app)
 │
-├── ⚙️ src/                         # Core Python package
-│   ├── preprocess.py               # Ben Graham preprocessing pipeline
-│   ├── model_utils.py              # EfficientNetB4 builder, Focal Loss, callbacks
-│   ├── gradcam_utils.py            # Grad-CAM engine (split-execution pattern)
-│   ├── database.py                 # MySQL scan record management
-│   ├── new_database.py             # Extended DB with model versioning & JSON probs
-│   ├── data_loader.py              # Training data generators & augmentation
-│   └── migrate_to_sqlite.py        # MySQL → SQLite migration utility
+├── src/                                # Core Python package
+│   ├── preprocess.py                   # Ben Graham preprocessing pipeline
+│   ├── model_utils.py                  # EfficientNetB4 builder, Focal Loss, callbacks
+│   ├── gradcam_utils.py                # Grad-CAM engine (split-execution pattern)
+│   ├── database.py                     # MySQL scan record management
+│   ├── new_database.py                 # Extended DB with model versioning & JSON probs
+│   ├── data_loader.py                  # Training data generators & augmentation
+│   └── migrate_to_sqlite.py            # MySQL → SQLite migration utility
 │
-├── 🧪 tests/
-│   └── test_validation.py          # Unit tests for retinal image validation
+├── tests/
+│   └── test_validation.py              # Unit tests for retinal image validation
 │
-├── 📜 scripts/
-│   └── check_exts.py               # Dataset extension audit utility
+├── scripts/
+│   └── check_exts.py                   # Dataset extension audit utility
 │
-├── 📊 results.json                 # Final model metrics snapshot
-├── 🗄️ retinascan_ai.db             # SQLite fallback database
-├── environment.yml                 # Conda environment spec (Python 3.11)
-├── requirements.txt                # pip dependencies
+├── results.json                        # Final model metrics snapshot
+├── retinascan_ai.db                    # SQLite fallback database
+├── environment.yml                     # Conda environment spec (Python 3.11)
+├── requirements.txt                    # pip dependencies
 └── README.md
 ```
 
 ---
 
-## 🔬 Research Notebooks
+## Research Notebooks
 
 The `notebooks/` directory contains the full end-to-end machine learning pipeline, designed to be run **sequentially**:
 
@@ -252,13 +252,13 @@ The `notebooks/` directory contains the full end-to-end machine learning pipelin
 | 02 | `02_preprocess.ipynb` | Ben Graham pipeline on APTOS 2019; quality inspection |
 | 03 | `03_baseline_model.ipynb` | Simple CNN baseline to establish a performance floor |
 | 04 | `04_Preprocess_eyepacs.ipynb` | EyePACS preprocessing, dataset merge, final split |
-| 05 | `05_efficientNet_training.ipynb` ⭐ | **Core training** — Phase 1 & 3 fine-tuning, metric logging |
+| 05 | `05_efficientNet_training.ipynb` | **Core training** — all three phases + ensemble |
 | 06 | `06_gradcam_efficientnetb4.ipynb` | Grad-CAM heatmap generation, per-class analysis, overlay export |
 | 07 | `07_database_integration.ipynb` | Database schema setup, batch scan insertion, analytics |
 
 ---
 
-## 🧠 Technical Deep Dive
+## Technical Deep Dive
 
 ### Preprocessing Pipeline (Ben Graham Method)
 
@@ -266,22 +266,22 @@ The `notebooks/` directory contains the full end-to-end machine learning pipelin
 Raw Fundus Image
       │
       ▼
-① Circular Crop         → Mask non-retinal corners with Gaussian-blurred boundary
+(1) Circular Crop         → Mask non-retinal corners with Gaussian-blurred boundary
       │
       ▼
-② Black Border Removal  → Crop tight bounding box around non-zero pixels
+(2) Black Border Removal  → Crop tight bounding box around non-zero pixels
       │
       ▼
-③ Local Avg Subtraction → addWeighted(img, 4, GaussianBlur(img), -4, 128)
-      │                    Normalizes illumination & reveals fine vessel structure
+(3) Local Avg Subtraction → addWeighted(img, 4, GaussianBlur(img), -4, 128)
+      │                     Normalizes illumination & reveals fine vessel structure
       ▼
-④ Resize → 380×380      → EfficientNetB4's native input resolution
+(4) Resize → 380×380      → EfficientNetB4's native input resolution
       │
       ▼
-⑤ CLAHE Enhancement     → Contrast Limited AHE in LAB color space (L channel)
-      │                    clip_limit=2.0, tile_grid=(8×8)
+(5) CLAHE Enhancement     → Contrast Limited AHE in LAB color space (L channel)
+      │                     clip_limit=2.0, tile_grid=(8×8)
       ▼
-⑥ float32 [0–255]       → NO division by 255 — EfficientNetB4 normalizes internally
+(6) float32 [0–255]       → NO division by 255 — EfficientNetB4 normalizes internally
       │
       ▼
    model.predict()
@@ -332,7 +332,7 @@ CREATE TABLE scans (
 
 ---
 
-## 📦 Dependencies
+## Dependencies
 
 | Package | Version | Purpose |
 |---|---|---|
@@ -346,7 +346,7 @@ CREATE TABLE scans (
 
 ---
 
-## 📈 Datasets
+## Datasets
 
 | Dataset | Source | Images | Classes |
 |---|---|:---:|:---:|
@@ -357,49 +357,31 @@ Both datasets use the same 0–4 DR grading scale (International Clinical DR Sca
 
 ---
 
-## 🤝 Contributing
+## Contributing
 
 Contributions, issues, and feature requests are welcome!
 
 1. Fork the repository
-2. Create your feature branch (`git checkout -b feature/AmazingFeature`)
-3. Commit your changes (`git commit -m 'Add some AmazingFeature'`)
-4. Push to the branch (`git push origin feature/AmazingFeature`)
+2. Create your feature branch (`git checkout -b feature/your-feature`)
+3. Commit your changes (`git commit -m 'Add your feature'`)
+4. Push to the branch (`git push origin feature/your-feature`)
 5. Open a Pull Request
 
 ---
 
-## 👤 Author
+## Author
 
 **Jeet Paghdar**
-
-> *Turning caffeine into code ☕ | Machine Learning & Full-stack enthusiast | Building AI-powered solutions for real-world impact 🚀*
 
 - GitHub: [@Jeet-Paghdar](https://github.com/Jeet-Paghdar)
 - Location: Gujarat, India
 
 ---
 
-## 📄 License
-
-This project is open source. See the [LICENSE](LICENSE) file for details.
-
----
-
-## 🙏 Acknowledgements
+## Acknowledgements
 
 - **APTOS 2019** organizers and Asia Pacific Tele-Ophthalmology Society
 - **EyePACS** / Kaggle 2015 DR Detection Challenge
 - **Ben Graham** — for the preprocessing technique used in competition-winning solutions
 - **Google Brain** — for the EfficientNet architecture
 - **TensorFlow / Keras** team
-
----
-
-<div align="center">
-
-*Built with ❤️ for clinical impact — because early detection saves sight.*
-
-⭐ **If this project helped you, please consider giving it a star!** ⭐
-
-</div>
