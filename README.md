@@ -112,15 +112,28 @@ The system is built on a two-phase transfer learning pipeline using **EfficientN
 ### Training Strategy
 
 ```
-Phase 1   ──  Frozen EfficientNetB4 backbone
-              Train custom head only (GlobalAvgPool → BN → Dense 512 → Dropout → Softmax)
-              LR = 1e-3 | Adam | Focal Loss (γ=2.0, α=0.25)
-              LR Schedule: Cosine Decay with 3-epoch warmup
+Phase 1   ──  Partial freeze: top layers of EfficientNetB4 unfrozen, BatchNorm kept frozen
+              Train custom head (GlobalAvgPool → BN → Dropout 0.4 → Dense 512 → Dense 256 → Softmax)
+              LR = CosineDecayRestarts (initial: 1e-4, decay steps: steps/epoch × 5)
+              Loss: CategoricalCrossentropy with label_smoothing=0.05
+              EarlyStopping on val_accuracy (patience=4)
+              Saved as: efficientnet_phase1.keras
 
-Phase 3   ──  Unfreeze top N layers of backbone (BatchNorm kept frozen)
-              Fine-tune with lower LR
-              EarlyStopping on val_loss (patience=8)
-              ModelCheckpoint on val_accuracy
+Phase 2   ──  Safe unfreeze: all backbone layers unfrozen, BatchNorm kept frozen
+              Loads Phase 1 best weights as starting point
+              LR = CosineDecayRestarts (initial: 1e-5, decay steps: steps/epoch × 5)
+              Loss: CategoricalCrossentropy with label_smoothing=0.05
+              EarlyStopping on val_accuracy (patience=6)
+              Saved as: efficientnet_best.keras
+
+Phase 3   ──  Deep fine-tuning: loads Phase 2 best weights
+              LR = CosineDecayRestarts (initial: 1e-6, decay steps: steps/epoch × 5)
+              Loss: CategoricalCrossentropy with label_smoothing=0.05
+              EarlyStopping on val_accuracy (patience=10)
+              Saved as: efficientnet_best.keras
+
+Ensemble  ──  Average softmax outputs of Phase 1 + Phase 3 checkpoints
+              Final Ensemble Accuracy: 82.05%
 ```
 
 ---
