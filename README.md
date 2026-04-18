@@ -369,15 +369,6 @@ Contributions, issues, and feature requests are welcome!
 
 ---
 
-## Author
-
-**Jeet Paghdar**
-
-- GitHub: [@Jeet-Paghdar](https://github.com/Jeet-Paghdar)
-- Location: Gujarat, India
-
----
-
 ## Acknowledgements
 
 - **APTOS 2019** organizers and Asia Pacific Tele-Ophthalmology Society
