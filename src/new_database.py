@@ -103,6 +103,14 @@ def setup_new_database():
             cursor.execute("USE retinascan_db")
             
             cursor.execute("""
+                CREATE TABLE IF NOT EXISTS users (
+                    id                  INT AUTO_INCREMENT PRIMARY KEY,
+                    username            VARCHAR(100) UNIQUE NOT NULL,
+                    password_hash       VARCHAR(255) NOT NULL
+                )
+            """)
+
+            cursor.execute("""
                 CREATE TABLE IF NOT EXISTS scans (
                     id                  INT AUTO_INCREMENT PRIMARY KEY,
                     patient_name        VARCHAR(100) NOT NULL,
@@ -117,14 +125,28 @@ def setup_new_database():
                     risk_level          VARCHAR(30),
                     scan_date           DATETIME NOT NULL,
                     notes               TEXT,
+                    created_by          VARCHAR(100),
                     INDEX idx_patient   (patient_name),
                     INDEX idx_grade     (grade),
                     INDEX idx_model     (model_version),
                     INDEX idx_scan_date (scan_date)
                 )
             """)
+            # Add created_by column if upgrading from old schema
+            try:
+                cursor.execute("ALTER TABLE scans ADD COLUMN created_by VARCHAR(100)")
+            except Exception:
+                pass  # Column already exists — safe to ignore
         else:
             # SQLite Setup
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS users (
+                    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+                    username            TEXT UNIQUE NOT NULL,
+                    password_hash       TEXT NOT NULL
+                )
+            """)
+
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS scans (
                     id                  INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -139,9 +161,15 @@ def setup_new_database():
                     model_version       TEXT NOT NULL DEFAULT 'EfficientNetB4_v82pct',
                     risk_level          TEXT,
                     scan_date           TIMESTAMP NOT NULL,
-                    notes               TEXT
+                    notes               TEXT,
+                    created_by          TEXT
                 )
             """)
+            # Add created_by column if upgrading from old schema
+            try:
+                cursor.execute("ALTER TABLE scans ADD COLUMN created_by TEXT")
+            except Exception:
+                pass  # Column already exists — safe to ignore
 
         conn.commit()
         cursor.close()
@@ -162,6 +190,7 @@ def insert_new_scan(
     gradcam_path: str = None,
     model_version: str = MODEL_VERSION_82PCT,
     notes: str = None,
+    created_by: str = None,
 ) -> int:
     """
     Insert a new scan record into the 'scans' table.
@@ -193,8 +222,8 @@ def insert_new_scan(
                 (patient_name, patient_age, eye_side,
                  grade, grade_name, confidence, all_probabilities,
                  gradcam_path, model_version, risk_level,
-                 scan_date, notes)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                 scan_date, notes, created_by)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """
         values = (
             patient_name,
@@ -209,6 +238,7 @@ def insert_new_scan(
             RISK_LEVELS[grade],
             datetime.datetime.now(),
             notes,
+            created_by,
         )
 
         cursor.execute(get_query(query), values)
@@ -265,12 +295,13 @@ def insert_scan_from_result(
 
 
 # ── READ ───────────────────────────────────────────────────────────────────────
-def get_all_new_scans(model_version: str = None) -> list:
+def get_all_new_scans(model_version: str = None, username: str = None) -> list:
     """
-    Fetch all scan records, optionally filtered by model version.
+    Fetch scan records, optionally filtered by model version and/or username.
 
     Args:
         model_version: If given, filter to only this model's records
+        username     : If given, filter to only this user's records
 
     Returns:
         List of tuples (all columns in 'scans' table)
@@ -280,13 +311,17 @@ def get_all_new_scans(model_version: str = None) -> list:
         return []
     try:
         cursor = conn.cursor()
+        conditions = []
+        params = []
         if model_version:
-            cursor.execute(
-                get_query("SELECT * FROM scans WHERE model_version = %s ORDER BY scan_date DESC"),
-                (model_version,),
-            )
-        else:
-            cursor.execute(get_query("SELECT * FROM scans ORDER BY scan_date DESC"))
+            conditions.append("model_version = %s")
+            params.append(model_version)
+        if username:
+            conditions.append("created_by = %s")
+            params.append(username)
+        where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
+        query = get_query(f"SELECT * FROM scans {where} ORDER BY scan_date DESC")
+        cursor.execute(query, params if params else ())
         return cursor.fetchall()
     except Error as e:
         print(f"[DB] Read error: {e}")
@@ -313,17 +348,23 @@ def get_new_scan_by_id(record_id: int) -> tuple:
         conn.close()
 
 
-def search_new_scans(patient_name: str) -> list:
-    """Search scan records by patient name (case-insensitive partial match)."""
+def search_new_scans(patient_name: str, username: str = None) -> list:
+    """Search scan records by patient name (case-insensitive partial match), scoped to user."""
     conn = get_connection()
     if not conn:
         return []
     try:
         cursor = conn.cursor()
-        cursor.execute(
-            get_query("SELECT * FROM scans WHERE patient_name LIKE %s ORDER BY scan_date DESC"),
-            (f"%{patient_name}%",),
-        )
+        if username:
+            cursor.execute(
+                get_query("SELECT * FROM scans WHERE patient_name LIKE %s AND created_by = %s ORDER BY scan_date DESC"),
+                (f"%{patient_name}%", username),
+            )
+        else:
+            cursor.execute(
+                get_query("SELECT * FROM scans WHERE patient_name LIKE %s ORDER BY scan_date DESC"),
+                (f"%{patient_name}%",),
+            )
         return cursor.fetchall()
     except Error as e:
         print(f"[DB] Search error: {e}")
@@ -366,12 +407,13 @@ def get_scan_probabilities(record_id: int) -> list:
 
 
 # ── STATISTICS ─────────────────────────────────────────────────────────────────
-def get_new_stats(model_version: str = None) -> dict:
+def get_new_stats(model_version: str = None, username: str = None) -> dict:
     """
     Compute aggregate statistics from the 'scans' table.
 
     Args:
         model_version: If given, filter to only this model's records
+        username     : If given, filter to only this user's records
 
     Returns:
         Dict with: total, dr_detected, severe_or_worse,
@@ -382,7 +424,12 @@ def get_new_stats(model_version: str = None) -> dict:
         return {}
     try:
         cursor = conn.cursor()
-        where = f"WHERE model_version = '{model_version}'" if model_version else ""
+        conditions = []
+        if model_version:
+            conditions.append(f"model_version = '{model_version}'")
+        if username:
+            conditions.append(f"created_by = '{username}'")
+        where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
 
         cursor.execute(get_query(f"SELECT COUNT(*) FROM scans {where}"))
         total = cursor.fetchone()[0]
@@ -624,3 +671,46 @@ if __name__ == '__main__':
             break
         else:
             print("Invalid choice.")
+
+
+# ── USER AUTHENTICATION ────────────────────────────────────────────────────────
+def register_user(username: str, password_hash: str) -> bool:
+    """Register a new user in the database. Returns True if successful."""
+    conn = get_connection()
+    if not conn: return False
+    try:
+        cursor = conn.cursor()
+        cursor.execute(
+            get_query("INSERT INTO users (username, password_hash) VALUES (%s, %s)"),
+            (username, password_hash)
+        )
+        conn.commit()
+        return True
+    except Error as e:
+        print(f"[DB] User Registration Error: {e}")
+        return False
+    except Exception as e:
+        print(f"[DB] User Registration Exception: {e}")
+        return False
+    finally:
+        cursor.close()
+        conn.close()
+
+def verify_user(username: str, password_hash: str) -> bool:
+    """Verify if username and password hash match. Returns True if successful."""
+    conn = get_connection()
+    if not conn: return False
+    try:
+        cursor = conn.cursor()
+        cursor.execute(
+            get_query("SELECT id FROM users WHERE username = %s AND password_hash = %s"),
+            (username, password_hash)
+        )
+        row = cursor.fetchone()
+        return row is not None
+    except Exception as e:
+        print(f"[DB] Verify User Error: {e}")
+        return False
+    finally:
+        cursor.close()
+        conn.close()
